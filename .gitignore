@@ -1,0 +1,34 @@
+# 运行时数据：系统库、演示库、报表图片、图床上传缓存
+backend/data/
+
+# 敏感文件：图床令牌、钉钉 webhook 备份等，别提交
+*令牌*.txt
+*token*.txt
+.env
+.env.*
+
+# 开发调试脚本（本地排查用，不入库）
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Node / 前端构建产物
+node_modules/
+dist/
+.vite/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 杂项
+*.log
+*.db
+*.sqlite3

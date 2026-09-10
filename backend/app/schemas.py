@@ -1,0 +1,90 @@
+"""接口出入参模型。"""
+from __future__ import annotations
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class LoginIn(BaseModel):
+    mobile: str = Field(..., min_length=4, max_length=20)
+
+
+class DataSourceIn(BaseModel):
+    name: str
+    db_type: str = "postgresql"
+    host: str = ""
+    port: int = 5432
+    database: str = ""
+    username: str = ""
+    password: str = ""
+    file_path: str = ""
+    is_active: bool = True
+
+
+class RegionIn(BaseModel):
+    standard_name: str
+    short_name: str = ""
+    parent: str = "邢台市"
+    level: str = "区县"
+    aliases: list[str] = Field(default_factory=list)
+    sort_order: int = 0
+    is_active: bool = True
+
+
+class StaffIn(BaseModel):
+    name: str
+    mobile: str
+    region_name: str = ""
+    role: str = "user"
+    position: str = ""
+    receive_alert: bool = True
+
+
+class BotIn(BaseModel):
+    name: str
+    webhook: str = ""
+    secret: str = ""
+    is_active: bool = True
+
+
+class RuleIn(BaseModel):
+    name: str
+    region_name: str = ""
+    data_source_id: int | None = None
+    table_name: str = ""
+    query: dict[str, Any] = Field(default_factory=dict)
+    region_field: str = ""
+    time_field: str = ""
+    template: str = ""
+    msg_type: str = "markdown"
+    bot_ids: list[int] = Field(default_factory=list)
+    at_config: dict[str, Any] = Field(default_factory=dict)
+    # 图片推送：{enabled, title, subtitle, max_rows, with_text, footer}
+    image: dict[str, Any] = Field(default_factory=dict)
+    schedule_type: str = "manual"
+    schedule: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    sample: dict[str, Any] = Field(default_factory=dict)
+
+
+class PreviewIn(BaseModel):
+    data_source_id: int
+    query: dict[str, Any] = Field(default_factory=dict)
+    region_field: str = ""
+    region_name: str = ""
+    template: str = ""
+    limit: int = 50
+    image: dict[str, Any] = Field(default_factory=dict)
+
+
+class SettingsIn(BaseModel):
+    public_base_url: str | None = None
+    image_retention_days: int | None = None
+    image_upload_mode: str | None = None
+    beeimg_url: str | None = None
+    beeimg_storage_id: str | None = None
+    beeimg_token: str | None = None
+    beeimg_expire_days: int | None = None
+    beeimg_is_public: bool | None = None
+    beeimg_remove_exif: bool | None = None
