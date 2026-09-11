@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import DataSource
+from ..models import DataSource, ResourcePermission, Staff
 from ..schemas import DataSourceIn
 from ..security import decrypt, encrypt, mask
 from ..services import metadata
@@ -43,8 +43,20 @@ def _get(db: Session, data_source_id: int) -> DataSource:
 
 
 @router.get("/datasources")
-def list_datasources(db: Session = Depends(get_db)):
-    return [_to_dict(item) for item in db.query(DataSource).order_by(DataSource.id).all()]
+def list_datasources(mobile: str = Query(""), db: Session = Depends(get_db)):
+    query = db.query(DataSource)
+    if mobile:
+        caller = db.query(Staff).filter(Staff.mobile == mobile).first()
+        if caller is not None and caller.role != "admin":
+            permitted_ids = [
+                r.resource_id
+                for r in db.query(ResourcePermission).filter(
+                    ResourcePermission.resource_type == "datasource",
+                    ResourcePermission.mobile == mobile,
+                ).all()
+            ]
+            query = query.filter(DataSource.id.in_(permitted_ids) if permitted_ids else False)
+    return [_to_dict(item) for item in query.order_by(DataSource.id).all()]
 
 
 @router.post("/datasources")
@@ -170,4 +182,3 @@ def get_schema(data_source_id: int, db: Session = Depends(get_db)):
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"读取结构失败：{exc}") from exc
     return snapshot
-

@@ -77,9 +77,12 @@ const groups = [
   },
 ]
 
-const visibleGroups = computed(() =>
-  groups.filter((group) => !group.adminOnly || store.isAdmin),
-)
+const visibleGroups = computed(() => {
+  // 管理员看到全部
+  if (store.isAdmin) return groups
+  // 非管理员：只显示基础菜单
+  return groups.filter((group) => group.label === '')
+})
 
 const userInitial = computed(() => (store.user?.name || '?').slice(0, 1))
 

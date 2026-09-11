@@ -71,6 +71,11 @@
               <div class="hint">把结果画成一张图发到群里，手机上不用左右滑动。</div>
             </div>
             <div class="field">
+              <label>发送Excel</label>
+              <el-switch v-model="form.send_excel" active-text="同时发送 Excel 数据文件" />
+              <div class="hint">生成 .xlsx 文件并在消息中附上下载链接。</div>
+            </div>
+            <div class="field">
               <label>状态</label>
               <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" />
             </div>
@@ -1053,9 +1058,9 @@ function applyScenario(item) {
 
 onMounted(async () => {
   const [ds, rg, bt, st, settings] = await Promise.all([
-    api.listDatasources(),
+    api.listDatasources(store.user?.mobile),
     api.listRegions(),
-    api.listBots(),
+    api.listBots(store.user?.mobile),
     api.listStaff(),
     api.getSettings().catch(() => ({})),
   ])

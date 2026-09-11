@@ -281,6 +281,24 @@ def run_rule(
             db, rule, image_cfg, title, rendered, rows, columns, highlight, result
         )
         result["image_url"] = image_url
+
+        if rule.send_excel and rows:
+            try:
+                import pandas as pd
+                from ..config import IMAGE_DIR
+                from datetime import datetime
+                excel_name = "excel_{}_{}.xlsx".format(rule.id, datetime.now().strftime("%Y%m%d_%H%M%S"))
+                excel_path = IMAGE_DIR / excel_name
+                df = pd.DataFrame(rows, columns=columns)
+                df.to_excel(excel_path, index=False, engine="openpyxl")
+                base = image_store.base_url(db)
+                if base:
+                    excel_url = image_store.url_for(base, excel_name)
+                    body += "\n\n📎 **数据文件**: [点击下载](" + excel_url + ")"
+                    result["warnings"].append("已生成 Excel 数据文件")
+            except Exception as exc:
+                result["warnings"].append("生成 Excel 文件失败: " + str(exc))
+
         errors: list[str] = []
         ok_count = 0
         for bot in bots:

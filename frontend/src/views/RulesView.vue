@@ -129,7 +129,7 @@ async function load() {
   try {
     const [ruleList, botList] = await Promise.all([
       api.listRules(store.user?.mobile),
-      api.listBots(),
+      api.listBots(store.user?.mobile),
     ])
     rules.value = ruleList
     bots.value = botList

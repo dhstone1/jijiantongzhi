@@ -62,6 +62,7 @@ def _to_dict(rule: PushRule) -> dict:
         "last_status": rule.last_status,
         "last_error": rule.last_error,
         "updated_at": rule.updated_at,
+        "send_excel": rule.send_excel,
     }
 
 
@@ -112,6 +113,7 @@ def create_rule(payload: RuleIn, mobile: str = Query(""), db: Session = Depends(
         schedule_type=payload.schedule_type,
         schedule_json=json.dumps(payload.schedule, ensure_ascii=False),
         enabled=payload.enabled,
+        send_excel=payload.send_excel,
         sample_json=json.dumps(payload.sample, ensure_ascii=False),
     )
     db.add(rule)
@@ -145,6 +147,7 @@ def update_rule(rule_id: int, payload: RuleIn, mobile: str = Query(""), db: Sess
     rule.schedule_json = json.dumps(payload.schedule, ensure_ascii=False)
     rule.enabled = payload.enabled
     rule.sample_json = json.dumps(payload.sample, ensure_ascii=False)
+    rule.send_excel = payload.send_excel
     if payload.region_name:
         rule.region_name = payload.region_name
     db.commit()

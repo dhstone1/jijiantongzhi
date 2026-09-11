@@ -89,6 +89,7 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
+import { useUserStore } from '../stores/user'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api'
 
@@ -106,7 +107,7 @@ onMounted(load)
 async function load() {
   loading.value = true
   try {
-    items.value = await api.listBots()
+    items.value = await api.listBots(store.user?.mobile)
   } finally {
     loading.value = false
   }
@@ -114,11 +115,20 @@ async function load() {
 
 function openDialog(row) {
   editing.value = row || null
+  activeTab.value = 'basic'
   Object.assign(form, {
     name: row?.name || '',
     webhook: row?.webhook || '',
     secret: '',
     is_active: row?.is_active ?? true,
+  })
+  permittedMobiles.value = []
+  Promise.all([
+    api.listStaff(),
+    row ? api.listPermissions('dingtalk_bot', row.id) : [],
+  ]).then(([staff, perms]) => {
+    staffList.value = staff.map((s) => ({ key: s.mobile, label: s.name + '(' + s.mobile + ')' }))
+    permittedMobiles.value = perms.map((p) => p.mobile)
   })
   dialogVisible.value = true
 }

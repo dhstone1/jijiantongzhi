@@ -66,6 +66,7 @@ class RuleIn(BaseModel):
     schedule: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     sample: dict[str, Any] = Field(default_factory=dict)
+    send_excel: bool = False
 
 
 class PreviewIn(BaseModel):
@@ -76,6 +77,7 @@ class PreviewIn(BaseModel):
     template: str = ""
     limit: int = 50
     image: dict[str, Any] = Field(default_factory=dict)
+    send_excel: bool = False
 
 
 class SettingsIn(BaseModel):
@@ -88,3 +90,9 @@ class SettingsIn(BaseModel):
     beeimg_expire_days: int | None = None
     beeimg_is_public: bool | None = None
     beeimg_remove_exif: bool | None = None
+
+
+class PermissionGrantIn(BaseModel):
+    resource_type: str
+    resource_id: int
+    mobiles: list[str] = Field(default_factory=list)

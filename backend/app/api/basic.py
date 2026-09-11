@@ -1,17 +1,17 @@
-"""基础配置接口：身份识别、归属地字典、人员信息表、钉钉机器人。"""
+"""基础配置接口：身份识别、归属地字典、人员信息表、钉钉机器人、权限管理。"""
 from __future__ import annotations
 
 import json
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 
 from ..config import IMAGE_DIR, IMAGE_URL_PREFIX, SERVER_PORT
 from ..db import get_db
-from ..models import DingTalkBot, Region, Staff
-from ..schemas import BotIn, LoginIn, RegionIn, SettingsIn, StaffIn
+from ..models import DingTalkBot, Region, ResourcePermission, Staff
+from ..schemas import BotIn, LoginIn, RegionIn, SettingsIn, StaffIn, PermissionGrantIn
 from ..security import decrypt, encrypt, mask
 from ..services import dingtalk, image_store
 from ..services.region_norm import DEFAULT_REGIONS, PARENT_CITY, RegionNormalizer
@@ -23,7 +23,7 @@ router = APIRouter()
 
 @router.post("/session/login")
 def login(payload: LoginIn, db: Session = Depends(get_db)):
-    """手机号识别身份。系统不设密码，此接口同时承担「我是谁」和「我能看哪些数据」。"""
+    """手机号识别身份。系统不设密码，此接口同时承担"我是谁"和"我能看哪些数据"。"""
     mobile = payload.mobile.strip()
     staff = db.query(Staff).filter(Staff.mobile == mobile).first()
     if staff is None:
@@ -138,7 +138,7 @@ def _staff_dict(item: Staff) -> dict:
 
 @router.get("/staff")
 def list_staff(db: Session = Depends(get_db)):
-    items = db.query(Staff).order_by(Staff.region_name, Staff.id).all()
+    items = db.query(Staff).order_by(Staff.id).all()
     return [_staff_dict(item) for item in items]
 
 
@@ -175,76 +175,64 @@ def delete_staff(staff_id: int, db: Session = Depends(get_db)):
 
 @router.post("/staff/import")
 async def import_staff(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """从 Excel 批量导入人员信息表：姓名 / 手机号 / 归属地。"""
-    from openpyxl import load_workbook
+    """从 Excel 批量导入/更新人员。要求列：姓名、手机号、归属地。"""
+    suffix = Path(file.filename or "staff.xlsx").suffix.lower() or ".xlsx"
+    if suffix not in (".xlsx", ".xlsm", ".csv"):
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv 文件")
 
-    suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
+    import pandas as pd
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
         handle.write(await file.read())
         temp_path = handle.name
 
     try:
-        workbook = load_workbook(temp_path, data_only=True)
-        worksheet = workbook.worksheets[0]
-        rows = [list(row) for row in worksheet.iter_rows(values_only=True)]
-    finally:
+        df = pd.read_excel(temp_path, dtype=str).fillna("")
+    except Exception as exc:
         Path(temp_path).unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"读取文件失败：{exc}") from exc
 
-    if not rows:
-        raise HTTPException(status_code=400, detail="文件为空")
-
-    header = [(str(c).strip() if c is not None else "") for c in rows[0]]
-    index_of = {}
-    for position, name in enumerate(header):
-        for key, words in (
-            ("name", ("姓名", "名字", "人员", "name")),
-            ("mobile", ("手机", "电话", "联系方式", "mobile", "phone")),
-            ("region", ("归属地", "区县", "区域", "单位", "region")),
-            ("position", ("岗位", "职位", "职务")),
-        ):
-            if key not in index_of and any(word in name for word in words):
-                index_of[key] = position
-
-    if "name" not in index_of or "mobile" not in index_of:
-        raise HTTPException(status_code=400, detail="未识别到「姓名」或「手机号」列")
+    header = list(df.columns)
+    name_col = next((c for c in header if "姓名" in c), header[0] if header else "")
+    mobile_col = next((c for c in header if "手机" in c or "电话" in c), header[1] if len(header) > 1 else "")
+    region_col = next((c for c in header if "归属" in c or "区域" in c or "地区" in c), header[2] if len(header) > 2 else "")
+    role_col = next((c for c in header if "角色" in c), None)
+    position_col = next((c for c in header if "职位" in c or "岗位" in c), None)
 
     normalizer = RegionNormalizer.from_db(db)
-    created, updated, unknown_regions = 0, 0, set()
+    created = 0
+    updated = 0
+    unknown_regions: set[str] = set()
 
-    for row in rows[1:]:
-        def cell(key: str) -> str:
-            position = index_of.get(key)
-            if position is None or position >= len(row) or row[position] is None:
-                return ""
-            return str(row[position]).strip()
-
-        name, mobile = cell("name"), cell("mobile")
+    for _, row in df.iterrows():
+        name = str(row.get(name_col, "")).strip()
+        mobile = str(row.get(mobile_col, "")).strip()
+        region_raw = str(row.get(region_col, "")).strip()
         if not name or not mobile:
             continue
-        raw_region = cell("region")
+
         region_name = ""
-        if raw_region:
-            outcome = normalizer.normalize(raw_region)
-            region_name = outcome.standard or ""
-            if not outcome.ok:
-                unknown_regions.add(raw_region)
+        if region_raw:
+            outcome = normalizer.normalize(region_raw)
+            if outcome.ok:
+                region_name = outcome.standard
+            else:
+                unknown_regions.add(region_raw)
+
+        kwargs = {
+            "name": name,
+            "region_name": region_name,
+            "role": str(row.get(role_col, "user")).strip() if role_col else "user",
+            "position": str(row.get(position_col, "")).strip() if position_col else "",
+        }
 
         existing = db.query(Staff).filter(Staff.mobile == mobile).first()
         if existing:
-            existing.name = name
-            existing.region_name = region_name or existing.region_name
-            if cell("position"):
-                existing.position = cell("position")
+            for k, v in kwargs.items():
+                setattr(existing, k, v)
             updated += 1
         else:
-            db.add(
-                Staff(
-                    name=name,
-                    mobile=mobile,
-                    region_name=region_name,
-                    position=cell("position"),
-                )
-            )
+            db.add(Staff(mobile=mobile, **kwargs))
             created += 1
 
     db.commit()
@@ -259,8 +247,20 @@ async def import_staff(file: UploadFile = File(...), db: Session = Depends(get_d
 # ---------------------------------------------------------------- 钉钉机器人
 
 @router.get("/bots")
-def list_bots(db: Session = Depends(get_db)):
-    items = db.query(DingTalkBot).order_by(DingTalkBot.id).all()
+def list_bots(mobile: str = Query(""), db: Session = Depends(get_db)):
+    query = db.query(DingTalkBot)
+    if mobile:
+        caller = db.query(Staff).filter(Staff.mobile == mobile).first()
+        if caller is not None and caller.role != "admin":
+            permitted_ids = [
+                r.resource_id
+                for r in db.query(ResourcePermission).filter(
+                    ResourcePermission.resource_type == "dingtalk_bot",
+                    ResourcePermission.mobile == mobile,
+                ).all()
+            ]
+            query = query.filter(DingTalkBot.id.in_(permitted_ids) if permitted_ids else False)
+    items = query.order_by(DingTalkBot.id).all()
     return [
         {
             "id": item.id,
@@ -326,7 +326,7 @@ def test_bot(bot_id: int, payload: dict | None = None, db: Session = Depends(get
         raise HTTPException(status_code=404, detail="机器人不存在")
 
     text = (payload or {}).get("text") or (
-        f"#### 推送配置测试\n\n> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"#### 推送配置测试\n> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "这条消息来自「运营数据推送系统」，说明 Webhook 配置正确。"
     )
     result = dingtalk.send_markdown(decrypt(bot.webhook_enc), decrypt(bot.secret_enc), "配置测试", text)
@@ -341,6 +341,62 @@ def test_bot(bot_id: int, payload: dict | None = None, db: Session = Depends(get
     if not result.ok:
         raise HTTPException(status_code=400, detail=result.message)
     return {"ok": True, "message": result.message}
+
+
+# ---------------------------------------------------------------- 资源可见权限
+
+@router.get("/permissions")
+def list_permissions(
+    resource_type: str = Query(...),
+    resource_id: int = Query(...),
+    db: Session = Depends(get_db),
+):
+    items = (
+        db.query(ResourcePermission)
+        .filter(
+            ResourcePermission.resource_type == resource_type,
+            ResourcePermission.resource_id == resource_id,
+        )
+        .all()
+    )
+    return [{"id": item.id, "mobile": item.mobile} for item in items]
+
+
+@router.post("/permissions")
+def grant_permissions(payload: PermissionGrantIn, db: Session = Depends(get_db)):
+    """全量覆盖：传入的手机号列表即为该资源所有可见人员。"""
+    resource_type = payload.resource_type
+    resource_id = payload.resource_id
+
+    # 校验资源是否存在
+    if resource_type == "datasource":
+        from ..models import DataSource
+        if not db.get(DataSource, resource_id):
+            raise HTTPException(status_code=404, detail="数据源不存在")
+    elif resource_type == "dingtalk_bot":
+        if not db.get(DingTalkBot, resource_id):
+            raise HTTPException(status_code=404, detail="钉钉群不存在")
+    else:
+        raise HTTPException(status_code=400, detail="不支持的资源类型")
+
+    # 删除旧的权限记录
+    db.query(ResourcePermission).filter(
+        ResourcePermission.resource_type == resource_type,
+        ResourcePermission.resource_id == resource_id,
+    ).delete()
+
+    # 批量新增
+    for mobile in payload.mobiles:
+        if mobile.strip():
+            db.add(
+                ResourcePermission(
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    mobile=mobile.strip(),
+                )
+            )
+    db.commit()
+    return {"ok": True, "count": len(payload.mobiles)}
 
 
 # ---------------------------------------------------------------- 系统设置

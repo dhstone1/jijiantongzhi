@@ -1,4 +1,4 @@
-"""系统自身的数据模型。"""
+"""系统自身的数据库模型。"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -107,8 +107,11 @@ class PushRule(Base):
 
     sample_json: Mapped[str] = mapped_column(Text, default="{}")
 
+    # 是否同时发送 Excel 数据文件
+    send_excel: Mapped[bool] = mapped_column(Boolean, default=False)
+
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    # 上次「真正发送成功」的时间，用于触发冷却；跳过的执行不会覆盖它
+    # 上次"真正发送成功"的时间，用于触发冷却；跳过的执行不会覆盖它
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_status: Mapped[str] = mapped_column(String(16), default="")
     last_error: Mapped[str] = mapped_column(Text, default="")
@@ -143,3 +146,15 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class ResourcePermission(Base):
+    """资源可见权限：记录数据源/钉钉群对哪些手机号可见。"""
+
+    __tablename__ = "resource_permission"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    resource_type: Mapped[str] = mapped_column(String(32), index=True)  # "datasource" 或 "dingtalk_bot"
+    resource_id: Mapped[int] = mapped_column(Integer, index=True)
+    mobile: Mapped[str] = mapped_column(String(20), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
