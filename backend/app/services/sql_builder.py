@@ -162,17 +162,29 @@ def build_query(
             raise ValueError(f"不支持的聚合函数：{func}")
         projections.append(f"{func.upper()}({preparer.quote(agg['column'])}) AS {preparer.quote(alias)}")
 
+    agg_aliases = frozenset(_agg_alias(a) for a in aggregations)
     output_columns = list(select) + [_agg_alias(a) for a in aggregations]
 
     sql = f"SELECT {', '.join(projections)} FROM {preparer.quote(table)}"
-    where, params = _build_where(
-        cfg, table_columns, region_field, region_value, normalizer, params, warnings, preparer
+    # 分组汇总字段（聚合别名）不能写在 WHERE 里，_build_where 会把它们挑出来放进 HAVING
+    where, having, params = _build_where(
+        cfg,
+        table_columns,
+        region_field,
+        region_value,
+        normalizer,
+        params,
+        warnings,
+        preparer,
+        agg_aliases,
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
     if group_by:
         _ensure_columns(group_by, table_columns)
         sql += " GROUP BY " + ", ".join(normalized.get(c) or preparer.quote(c) for c in group_by)
+    if having:
+        sql += " HAVING " + " AND ".join(having)
 
     order_by = [o for o in (cfg.get("order_by") or []) if o.get("column")]
     if order_by:
@@ -193,6 +205,32 @@ def build_query(
     return BuiltQuery(sql=sql, params=params, warnings=warnings)
 
 
+def _as_number(value):
+    """能当数字用就转成数字，否则原样返回。"""
+    if isinstance(value, bool) or not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return value
+
+
+def _filter_value(value, numeric: bool):
+    """筛选值来自输入框，都是字符串。
+
+    分组汇总的结果（聚合别名）没有字段亲和性，SQLite 里拿它跟字符串比大小会永远判成假，
+    所以 HAVING 的筛选值必须转成真正的数字。
+    """
+    return _as_number(value) if numeric else value
+
+
 def _build_where(
     cfg: dict,
     table_columns: list[str],
@@ -202,8 +240,15 @@ def _build_where(
     params: dict,
     warnings: list[str],
     preparer,
-) -> tuple[list[str], dict]:
+    agg_aliases: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], dict]:
+    """拆成 WHERE（表字段）和 HAVING（分组汇总算出来的字段）两段条件。
+
+    分组汇总的字段（如「告警次数」）在 SQL 里是聚合别名，写在 WHERE 里数据库不认，
+    所以统一放到 HAVING，位置在 GROUP BY 之后。
+    """
     where: list[str] = []
+    having: list[str] = []
 
     # --- 归属地过滤：始终第一个条件，任何配置都无法绕过 ---
     if region_field and region_value:
@@ -226,15 +271,18 @@ def _build_where(
         op = str(filter_item.get("op") or "=").lower().strip()
         if not column or op not in ALLOWED_OPS:
             continue
-        if column not in table_columns:
+        # 分组汇总算出来的字段走 HAVING，其余按表字段走 WHERE
+        in_having = column in agg_aliases
+        if not in_having and column not in table_columns:
             warnings.append(f"忽略不存在的字段条件：{column}")
             continue
 
+        clause = having if in_having else where
         quoted = preparer.quote(column)
         key = f"_f{len(params)}"
 
         if op in ("is null", "is not null"):
-            where.append(f"{quoted} IS {'NOT ' if op == 'is not null' else ''}NULL")
+            clause.append(f"{quoted} IS {'NOT ' if op == 'is not null' else ''}NULL")
         elif op in ("in", "not in"):
             values = filter_item.get("values") or []
             if isinstance(values, str):
@@ -244,22 +292,23 @@ def _build_where(
             keys = []
             for index, value in enumerate(values):
                 sub_key = f"{key}_{index}"
-                params[sub_key] = value
+                params[sub_key] = _filter_value(value, in_having)
                 keys.append(f":{sub_key}")
-            where.append(f"{quoted} {'NOT IN' if op == 'not in' else 'IN'} ({', '.join(keys)})")
+            clause.append(f"{quoted} {'NOT IN' if op == 'not in' else 'IN'} ({', '.join(keys)})")
         elif op == "between":
             start, end = filter_item.get("value"), filter_item.get("value2")
             if start in (None, "") or end in (None, ""):
                 continue
-            params[f"{key}_a"], params[f"{key}_b"] = start, end
-            where.append(f"{quoted} BETWEEN :{key}_a AND :{key}_b")
+            params[f"{key}_a"] = _filter_value(start, in_having)
+            params[f"{key}_b"] = _filter_value(end, in_having)
+            clause.append(f"{quoted} BETWEEN :{key}_a AND :{key}_b")
         else:
             value = filter_item.get("value")
             if value in (None, "") and op not in ("=", "!="):
                 continue
-            params[key] = value
+            params[key] = _filter_value(value, in_having)
             sql_op = "LIKE" if op == "like" else ("NOT LIKE" if op == "not like" else op)
-            where.append(f"{quoted} {sql_op} :{key}")
+            clause.append(f"{quoted} {sql_op} :{key}")
 
     # --- 时间范围 ---
     time_cfg = cfg.get("time_range") or {}
@@ -275,7 +324,7 @@ def _build_where(
     elif time_field:
         warnings.append(f"忽略不存在的时间字段：{time_field}")
 
-    return where, params
+    return where, having, params
 
 
 def duration_expression(

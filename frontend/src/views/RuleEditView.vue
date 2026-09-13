@@ -230,7 +230,8 @@
 
               <div class="hint">
                 分组字段选「区县」，汇总项选「计数 / 基站名称」，就能得到各区县故障条数；
-                汇总项留空则按明细逐条发送。
+                汇总项留空则按明细逐条发送。汇总算出来的字段（如「告警次数」）可以直接用在
+                下方的「筛选条件」和「排序」里，系统会自动把它放到分组之后筛选（HAVING）。
               </div>
             </div>
 
@@ -238,7 +239,12 @@
               <div class="block-title">筛选条件</div>
               <div v-for="(f, i) in form.query.filters" :key="i" class="cond-row">
                 <el-select v-model="f.column" placeholder="字段" filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="f.op" class="cond-op">
                   <el-option v-for="op in operators" :key="op.value" :label="op.label" :value="op.value" />
@@ -262,6 +268,10 @@
               <el-button size="small" text type="primary" @click="addFilter">
                 <el-icon><Plus /></el-icon> 添加条件
               </el-button>
+              <div v-if="aggColumns.length" class="hint">
+                「分组汇总字段」（如告警次数）是分组算完之后才有的，选它会生成 SQL 的 HAVING，
+                也就是先分组统计、再筛掉不达标的组；表字段仍然是取数前就过滤。
+              </div>
             </div>
 
             <div class="block">
@@ -289,7 +299,12 @@
               <div class="block-title">排序与条数</div>
               <div v-for="(o, i) in form.query.order_by" :key="i" class="cond-row">
                 <el-select v-model="o.column" placeholder="排序字段" filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="o.direction" class="cond-op">
                   <el-option label="降序" value="desc" />
@@ -1108,6 +1123,11 @@ const outputColumns = computed(() => {
   return names
 })
 
+// 分组汇总算出来的字段。筛选条件里选它们会走到 HAVING，而不是 WHERE
+const aggColumns = computed(() =>
+  outputColumns.value.filter((name) => !form.query.select.includes(name)),
+)
+
 const hitIndexSet = computed(() => new Set(preview.hit_indexes || []))
 
 // 触发条件开了（阈值 / 分组统计）才需要展示命中情况
@@ -1406,10 +1426,8 @@ async function runPreview() {
 let previewTimer = null
 watch(
   () => [
-    JSON.stringify(form.query.select),
-    JSON.stringify(form.query.group_by),
-    JSON.stringify(form.query.aggregations),
-    JSON.stringify(form.query.trigger),
+    // 整块 query 一起盯：以前漏了筛选条件 / 时间范围 / 排序，改了这些预览不会刷新
+    JSON.stringify(form.query),
     JSON.stringify(form.image),
     form.region_field,
     form.region_name,
