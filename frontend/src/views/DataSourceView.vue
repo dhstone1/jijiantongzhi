@@ -149,9 +149,9 @@
             <el-table :data="previewRows" size="small" border max-height="360">
               <el-table-column
                 v-for="col in previewColumns"
-                :key="col"
-                :prop="col"
-                :label="col"
+                :key="col.key"
+                :prop="col.key"
+                :label="col.label"
                 min-width="120"
                 show-overflow-tooltip
               />
@@ -304,8 +304,16 @@ async function selectTable(name) {
     api.previewTable(current.value.id, name, previewLimit.value),
   ])
   tableColumns.value = cols
-  previewColumns.value = pv.columns
-  previewRows.value = pv.rows
+  // 预览接口给的是「按字段顺序排的数组」，el-table 要的是对象，这里按下标映射成对象。
+  // key 用下标而不是字段名，视图里出现同名字段也不会互相覆盖。
+  previewColumns.value = pv.columns.map((name, index) => ({ key: `c${index}`, label: name }))
+  previewRows.value = pv.rows.map((row) => {
+    const item = {}
+    pv.columns.forEach((_, index) => {
+      item[`c${index}`] = row[index]
+    })
+    return item
+  })
 }
 </script>
 
