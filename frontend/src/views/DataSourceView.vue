@@ -116,7 +116,10 @@
     <el-drawer v-model="browseVisible" :title="`浏览数据 · ${current?.name || ''}`" size="72%">
       <div class="browse">
         <div class="table-list">
-          <el-input v-model="keyword" placeholder="搜索表名" clearable size="small" style="margin-bottom: 10px" />
+          <div class="list-tools">
+            <el-input v-model="keyword" placeholder="搜索表名" clearable size="small" />
+            <el-button text size="small" :loading="refreshing" @click="refreshSchema">刷新</el-button>
+          </div>
           <div
             v-for="t in filteredTables"
             :key="t.name"
@@ -185,6 +188,7 @@ const tableColumns = ref([])
 const previewColumns = ref([])
 const previewRows = ref([])
 const previewLimit = ref(20)
+const refreshing = ref(false)
 
 const form = reactive({
   name: '',
@@ -297,6 +301,17 @@ async function browse(row) {
   tables.value = await api.listTables(row.id)
 }
 
+async function refreshSchema() {
+  refreshing.value = true
+  try {
+    const result = await api.refreshSchema(current.value.id)
+    ElMessage.success(`已刷新表结构，共 ${result.table_count} 张表`)
+    tables.value = await api.listTables(current.value.id)
+  } finally {
+    refreshing.value = false
+  }
+}
+
 async function selectTable(name) {
   currentTable.value = name
   const [cols, pv] = await Promise.all([
@@ -337,6 +352,17 @@ async function selectTable(name) {
   border-right: 1px solid var(--line-soft);
   padding-right: 14px;
   overflow-y: auto;
+}
+
+.list-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.list-tools .el-input {
+  flex: 1;
 }
 
 .table-item {
