@@ -39,14 +39,14 @@ export const api = {
   },
 
   // 钉钉
-  listBots: () => http.get('/bots'),
+  listBots: (mobile) => http.get('/bots', { params: { mobile } }),
   createBot: (data) => http.post('/bots', data),
   updateBot: (id, data) => http.put(`/bots/${id}`, data),
   deleteBot: (id) => http.delete(`/bots/${id}`),
   testBot: (id) => http.post(`/bots/${id}/test`, {}),
 
   // 数据源
-  listDatasources: () => http.get('/datasources'),
+  listDatasources: (mobile) => http.get('/datasources', { params: { mobile } }),
   createDatasource: (data) => http.post('/datasources', data),
   updateDatasource: (id, data) => http.put(`/datasources/${id}`, data),
   deleteDatasource: (id) => http.delete(`/datasources/${id}`),
@@ -57,6 +57,13 @@ export const api = {
     http.get(`/datasources/${id}/preview`, { params: { table, limit } }),
   refreshSchema: (id) => http.post(`/datasources/${id}/refresh`),
   getSchema: (id) => http.get(`/datasources/${id}/schema`),
+
+  // 资源可见权限（数据源 / 钉钉群分别对哪些人可见）
+  listPermissions: (resourceType, resourceId) =>
+    http.get('/permissions', {
+      params: { resource_type: resourceType, resource_id: resourceId },
+    }),
+  grantPermissions: (data) => http.post('/permissions', data),
 
   // 规则
   listRules: (mobile) => http.get('/rules', { params: { mobile } }),
@@ -89,4 +96,3 @@ export const api = {
 }
 
 export default http
-

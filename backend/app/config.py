@@ -20,8 +20,10 @@ DEMO_DB_PATH = DATA_DIR / "demo_business.db"
 # 单次推送最大行数上限，防止刷屏
 MAX_ROWS_HARD_LIMIT = int(os.getenv("MAX_ROWS_HARD_LIMIT", "200"))
 
-# 后端监听端口，只用于给「图片服务地址」生成候选值
-SERVER_PORT = int(os.getenv("APP_PORT", "8080"))
+# 后端监听端口，只用于给「图片服务地址」生成候选值。
+# 默认避开 Windows 保留段：Hyper-V/WSL 会在 1024-15000 里动态划走成段端口，
+# 8080、8000 这类常用端口随时可能被占住（绑定报 WinError 10013）。
+SERVER_PORT = int(os.getenv("APP_PORT", "18080"))
 
 # 推送出去的报表图片存放目录，通过 /static/reports 对外提供
 IMAGE_DIR = Path(os.getenv("APP_IMAGE_DIR", DATA_DIR / "images"))

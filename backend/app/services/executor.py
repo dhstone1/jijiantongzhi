@@ -283,21 +283,9 @@ def run_rule(
         result["image_url"] = image_url
 
         if rule.send_excel and rows:
-            try:
-                import pandas as pd
-                from ..config import IMAGE_DIR
-                from datetime import datetime
-                excel_name = "excel_{}_{}.xlsx".format(rule.id, datetime.now().strftime("%Y%m%d_%H%M%S"))
-                excel_path = IMAGE_DIR / excel_name
-                df = pd.DataFrame(rows, columns=columns)
-                df.to_excel(excel_path, index=False, engine="openpyxl")
-                base = image_store.base_url(db)
-                if base:
-                    excel_url = image_store.url_for(base, excel_name)
-                    body += "\n\n📎 **数据文件**: [点击下载](" + excel_url + ")"
-                    result["warnings"].append("已生成 Excel 数据文件")
-            except Exception as exc:
-                result["warnings"].append("生成 Excel 文件失败: " + str(exc))
+            excel_url = build_excel(db, rule, rows, columns, result)
+            if excel_url:
+                body += f"\n\n📎 **数据文件**：[点击下载]({excel_url})"
 
         errors: list[str] = []
         ok_count = 0
@@ -434,6 +422,68 @@ def build_body(
     if text_part.strip():
         return f"{text_part}\n\n{image_line}", image_url
     return f"#### {caption}\n\n{image_line}", image_url
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def build_excel(
+    db: Session,
+    rule: PushRule,
+    rows: list[dict],
+    columns: list[str],
+    result: dict,
+) -> str:
+    """把本次数据导出成 Excel，返回可下载地址；生成不出来就返回空串。
+
+    图床模式优先传图床（钉钉手机端才拉得到），图床不收 xlsx 就退回本系统地址，
+    两种情况都往 warnings 里写清楚，免得运营人员以为附件发出去了。
+    """
+    import pandas as pd  # 只有开了 Excel 的规则才需要它
+    from io import BytesIO
+
+    try:
+        buffer = BytesIO()
+        pd.DataFrame(rows, columns=columns).to_excel(buffer, index=False, engine="openpyxl")
+        content = buffer.getvalue()
+    except Exception as exc:  # noqa: BLE001 - 导出失败不该让整条推送失败
+        result["warnings"].append(f"生成 Excel 文件失败：{exc}")
+        return ""
+
+    safe_name = "".join(ch for ch in (rule.name or "report") if ch not in '\\/:*?"<>|').strip()
+    filename = f"{safe_name or 'report'}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+
+    if image_store.upload_mode(db) == image_store.MODE_BEEIMG:
+        try:
+            url = image_host.upload_file(
+                content,
+                filename=filename,
+                content_type=XLSX_MIME,
+                **image_store.beeimg_config(db, intro=f"{rule.name} 数据文件"),
+            )
+        except image_host.UploadError as exc:
+            result["warnings"].append(f"Excel 上传图床失败，改用本系统地址：{exc}")
+        else:
+            result["warnings"].append("已生成 Excel 数据文件（已上传图床）")
+            return url
+
+    base = image_store.base_url(db)
+    if not base:
+        result["warnings"].append(
+            "还没配置「图片服务地址」，Excel 下载链接发不出去，本次只发文字（可在「系统设置」里补上）"
+        )
+        return ""
+    if image_store.is_local_url(base):
+        result["warnings"].append(
+            f"文件地址是 {base}，钉钉手机端可能下载不了，建议改成局域网地址或改用图床"
+        )
+    name = image_store.save(content, rule.id, suffix=".xlsx")
+    try:
+        image_store.cleanup(image_store.retention_days(db))
+    except OSError:
+        pass
+    result["warnings"].append("已生成 Excel 数据文件")
+    return image_store.url_for(base, name)
 
 
 def _write_log(

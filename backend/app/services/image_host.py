@@ -119,13 +119,14 @@ def _fields(
     return data
 
 
-def upload_png(
-    png: bytes,
+def upload_file(
+    content: bytes,
     *,
+    filename: str = "report.png",
+    content_type: str = "image/png",
     url: str = UPLOAD_URL,
     storage_id: str = "1",
     token: str = "",
-    filename: str = "report.png",
     expired_at: str = "",
     intro: str = "",
     tags=None,
@@ -133,7 +134,10 @@ def upload_png(
     is_remove_exif=None,
     album_id: str = "",
 ) -> str:
-    """上传一张 PNG，返回公网可访问地址。"""
+    """上传一个文件，返回公网可访问地址。
+
+    图床是以图片为前提的，非图片格式能不能传要看图床放不放行（多半会被判 422）。
+    """
     global _working_style
 
     base_data = _fields(
@@ -159,7 +163,7 @@ def upload_png(
             try:
                 response = requests.post(
                     url or UPLOAD_URL,
-                    files={"file": (filename, png, "image/png")},
+                    files={"file": (filename, content, content_type)},
                     data=data,
                     headers=headers,
                     timeout=TIMEOUT,
@@ -208,3 +212,8 @@ def upload_png(
     elif "储存" in message or "存储" in message or "storage" in message.lower():
         message += "（请检查「存储 ID」是否是图床里真实存在的存储）"
     raise UploadError(f"图床返回：{message}")
+
+
+def upload_png(png: bytes, **kwargs) -> str:
+    """上传一张 PNG，返回公网可访问地址。"""
+    return upload_file(png, **kwargs)
