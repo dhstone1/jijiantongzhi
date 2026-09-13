@@ -231,11 +231,32 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
         # 触发判定：表格里展示全部取数结果，但只有命中行会真正发出去
         trigger_cfg = trigger.normalize(cfg.get("trigger"))
         outcome = trigger.evaluate(rows, trigger_cfg, columns)
+        limit_notes: list[str] = []
+        scan_limit = int(built.params.get("_limit") or 0)
+        if scan_limit and len(rows) >= scan_limit and trigger_cfg["mode"] != "always":
+            limit_notes.append(
+                f"取数达到扫描上限 {scan_limit} 行，后面的数据没取到，判定结果可能不全，"
+                "建议缩小时间范围"
+            )
         hit_rows = outcome.rows
-        if outcome.columns:
-            # 分组统计会自己算出一列（比如「出现次数」），列名要跟着一起换
-            columns = outcome.columns
-        hit_set = set(outcome.hit_indexes)
+        if trigger_cfg["mode"] == "group":
+            # 分组统计自己算出一批行（汇总行，或命中组的明细行），预览就显示这批，
+            # 跟真正发出去的内容一致；列名也换成它自己算出来的那些
+            rows = outcome.rows
+            columns = outcome.columns or columns
+            hit_set = set(range(len(rows)))
+        else:
+            hit_set = set(outcome.hit_indexes)
+
+        # 取数是按扫描上限取全的，展示和渲染按「最多发送条数」截
+        display_limit = max(int(payload.limit or 50), 1)
+        if len(rows) > display_limit:
+            limit_notes.append(f"结果 {len(rows)} 行，预览只显示前 {display_limit} 行")
+            rows = rows[:display_limit]
+        if len(hit_rows) > display_limit:
+            limit_notes.append(f"命中 {len(hit_rows)} 行，预览只渲染前 {display_limit} 行")
+            hit_rows = hit_rows[:display_limit]
+        hit_set = {index for index in hit_set if index < len(rows)}
 
         image_cfg = dict(payload.image or {})
         # 图片真能发出去时，文字部分才去掉数据表；本机模式要先配好「图片服务地址」
@@ -314,7 +335,7 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
                 "cooldown_minutes": trigger_cfg["cooldown_minutes"],
             },
             "sql": built.sql,
-            "warnings": built.warnings + trigger_warnings + render_warnings,
+            "warnings": built.warnings + limit_notes + trigger_warnings + render_warnings,
             "rendered": rendered,
             "image_path": image_path,
             "image_url": image_url,

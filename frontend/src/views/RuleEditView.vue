@@ -320,6 +320,12 @@
                 </el-button>
                 <span class="muted split">最多发送条数</span>
                 <el-input-number v-model="form.query.limit" :min="1" :max="2000" class="cond-num" />
+                <span class="muted">行，限制的是发出去的行数</span>
+              </div>
+              <div class="hint">
+                触发判定（阈值条件 / 同一字段累计达到标准）是在取到的全量数据上算的，
+                不受这里影响。分组统计尤其需要全量：只取几十行的话，
+                「同一个基站出现 3 次」这种结论就会被截断。
               </div>
             </div>
 

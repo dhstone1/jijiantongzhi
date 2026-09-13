@@ -20,6 +20,11 @@ DEMO_DB_PATH = DATA_DIR / "demo_business.db"
 # 单次推送最大行数上限，防止刷屏
 MAX_ROWS_HARD_LIMIT = int(os.getenv("MAX_ROWS_HARD_LIMIT", "200"))
 
+# 触发判定（阈值条件 / 分组统计）的取数上限。
+# 「最多发送条数」限制的是发出去的行数，不是扫描行数：分组统计如果只取几十行，
+# 「同一个基站出现 3 次」这种结论就会被截断。所以判定类的取数单独放开上限。
+TRIGGER_SCAN_ROWS = int(os.getenv("TRIGGER_SCAN_ROWS", "20000"))
+
 # 后端监听端口，只用于给「图片服务地址」生成候选值。
 # 默认避开 Windows 保留段：Hyper-V/WSL 会在 1024-15000 里动态划走成段端口，
 # 8080、8000 这类常用端口随时可能被占住（绑定报 WinError 10013）。

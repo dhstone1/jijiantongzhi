@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from ..config import TRIGGER_SCAN_ROWS
 from .region_norm import RegionNormalizer
 
 ALLOWED_OPS = ("=", "!=", ">", ">=", "<", "<=", "like", "not like", "in", "not in", "between", "is null", "is not null")
@@ -198,11 +199,25 @@ def build_query(
         if clauses:
             sql += " ORDER BY " + ", ".join(clauses)
 
-    limit = min(int(cfg.get("limit") or 50), max_rows)
+    limit = effective_limit(cfg, max_rows)
     params["_limit"] = limit
     sql += " LIMIT :_limit"
 
     return BuiltQuery(sql=sql, params=params, warnings=warnings)
+
+
+def effective_limit(cfg: dict, max_rows: int) -> int:
+    """取数上限。
+
+    「最多发送条数」限制的是发出去的行数，不是扫描行数：触发判定（尤其分组统计的
+    「同一个值出现 N 次」）必须在整批数据上算，只取几十行就下结论必然算错。
+    所以判定类规则按 TRIGGER_SCAN_ROWS 取数，真正发出去的行数在外面再截。
+    """
+    limit = max(int(cfg.get("limit") or 50), 1)
+    mode = str((cfg.get("trigger") or {}).get("mode") or "always").lower()
+    if mode in ("threshold", "group"):
+        return min(max(limit, TRIGGER_SCAN_ROWS), max(max_rows, TRIGGER_SCAN_ROWS))
+    return min(limit, max_rows)
 
 
 def _as_number(value):

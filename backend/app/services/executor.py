@@ -84,6 +84,14 @@ def execute_query(
             if isinstance(value, datetime):
                 row[key] = value.strftime("%Y-%m-%d %H:%M:%S")
 
+    limit_used = int(built.params.get("_limit") or 0)
+    trigger_mode = str((query_cfg.get("trigger") or {}).get("mode") or "always").lower()
+    if limit_used and len(rows) >= limit_used and trigger_mode != "always":
+        built.warnings.append(
+            f"取数达到扫描上限 {limit_used} 行，后面的数据没取到，判定结果可能不全，"
+            "建议缩小时间范围"
+        )
+
     return keys, rows, built.warnings
 
 
@@ -214,7 +222,7 @@ def run_rule(
         if not rows:
             empty_action = (query_cfg.get("empty_action") or "skip").lower()
             if empty_action == "skip":
-                result.update(success=True, message="无数据，按配置跳过发送")
+                result.update(success=True, sent=False, message="无数据，按配置跳过发送")
                 _write_log(db, rule, trigger, True, 0, 0, "", "无数据，已跳过")
                 return result
 
@@ -232,7 +240,7 @@ def run_rule(
 
         if not outcome.hit:
             message = f"未达到触发条件，本次不发送（{outcome.summary}）"
-            result.update(success=True, message=message)
+            result.update(success=True, sent=False, message=message)
             _write_log(db, rule, trigger, True, 0, 0, "", message)
             return result
 
@@ -240,14 +248,27 @@ def run_rule(
         if outcome.columns:
             # 分组统计会自己算出一列（比如「出现次数」），列名要跟着一起换
             columns = outcome.columns
+        # 取数是按扫描上限取全的，真正发出去的行数按「最多发送条数」截
+        send_limit = min(max(int(query_cfg.get("limit") or 50), 1), MAX_ROWS_HARD_LIMIT)
+        if len(rows) > send_limit:
+            result["warnings"].append(
+                f"命中 {len(rows)} 行，按「最多发送条数」只发前 {send_limit} 行"
+            )
+            rows = rows[:send_limit]
         result["rows"] = rows
 
         # ---- 冷却：同一条告警在冷却期内不重复推送 ----
         cooldown = trigger_engine.normalize(trigger_cfg)["cooldown_minutes"]
         remaining = trigger_engine.cooldown_remaining(rule.last_fired_at, cooldown)
-        if remaining > 0:
+        if remaining > 0 and trigger == "manual":
+            # 手动点「立即发送」是明确要发一次，冷却只拦自动推送
+            result["warnings"].append(
+                f"手动运行，已忽略 {cooldown} 分钟冷却（定时推送仍按冷却执行，"
+                f"距上次发送 {cooldown - remaining:.0f} 分钟）"
+            )
+        elif remaining > 0:
             message = f"距上次发送不足 {cooldown} 分钟（还剩约 {remaining:.0f} 分钟），本次跳过"
-            result.update(success=True, message=message)
+            result.update(success=True, sent=False, message=message)
             _write_log(db, rule, trigger, True, 0, 0, "", message)
             return result
 
@@ -262,7 +283,7 @@ def run_rule(
         result["warnings"].extend(render_warnings)
 
         if dry_run:
-            result.update(success=True, message="预览完成（未发送）")
+            result.update(success=True, sent=False, message="预览完成（未发送）")
             return result
 
         at_config = load_at_config(rule)

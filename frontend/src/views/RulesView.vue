@@ -81,12 +81,16 @@
     <el-dialog v-model="resultVisible" title="发送结果" width="680px">
       <div v-if="runResult">
         <el-alert
-          :type="runResult.success ? 'success' : 'error'"
-          :title="runResult.message || (runResult.success ? '执行成功' : '执行失败')"
+          :type="alertType"
+          :title="alertTitle"
           :description="runResult.error || ''"
           :closable="false"
           show-icon
         />
+        <div v-if="runResult.trigger && runResult.trigger.summary" class="result-block">
+          <div class="result-title">触发判定</div>
+          <div class="warn-line">{{ runResult.trigger.summary }}</div>
+        </div>
         <div v-if="runResult.warnings && runResult.warnings.length" class="result-block">
           <div class="result-title">过程提示</div>
           <div v-for="(msg, i) in runResult.warnings" :key="i" class="warn-line">· {{ msg }}</div>
@@ -119,6 +123,23 @@ const loading = ref(false)
 const running = ref(null)
 const resultVisible = ref(false)
 const runResult = ref(null)
+
+// 「执行成功」不代表「发出去了」：没命中、在冷却期、没数据都会跳过，
+// 用黄色提示区分开，别让人以为消息已经发了。
+const alertType = computed(() => {
+  const result = runResult.value
+  if (!result) return 'info'
+  if (!result.success) return 'error'
+  return result.sent ? 'success' : 'warning'
+})
+
+const alertTitle = computed(() => {
+  const result = runResult.value
+  if (!result) return ''
+  if (!result.success) return result.message || '执行失败'
+  if (!result.sent) return result.message || '本次没有发送'
+  return result.message || '已发送'
+})
 
 const WEEK = { mon: '周一', tue: '周二', wed: '周三', thu: '周四', fri: '周五', sat: '周六', sun: '周日' }
 
