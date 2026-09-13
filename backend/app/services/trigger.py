@@ -35,6 +35,19 @@ OP_LABELS = {
 MODE_LABELS = {
     "always": "有数据就发送",
     "threshold": "满足触发条件才发送",
+    "group": "同一字段累计达到标准才发送",
+}
+
+# 分组统计的算法。count 数行数，其余作用在指定的数值字段上。
+GROUP_FUNCS = ("count", "count_distinct", "sum", "avg", "max", "min")
+
+GROUP_FUNC_LABELS = {
+    "count": "出现次数",
+    "count_distinct": "去重数",
+    "sum": "合计",
+    "avg": "平均",
+    "max": "最大值",
+    "min": "最小值",
 }
 
 
@@ -50,6 +63,8 @@ class TriggerResult:
     summary: str = ""
     warnings: list = field(default_factory=list)
     detail: list = field(default_factory=list)
+    # 触发判定自己算出来的列（分组统计会加一列），None 表示沿用取数结果的列
+    columns: list | None = None
 
     @property
     def hit_count(self) -> int:
@@ -64,8 +79,20 @@ def normalize(cfg: dict | None) -> dict:
     """补齐默认值，保证执行器拿到的一定是完整结构。"""
     cfg = dict(cfg or {})
     mode = str(cfg.get("mode") or "always").lower()
-    if mode not in ("always", "threshold"):
+    if mode not in ("always", "threshold", "group"):
         mode = "always"
+
+    func = str(cfg.get("func") or "count").lower()
+    if func not in GROUP_FUNCS:
+        func = "count"
+
+    group_op = str(cfg.get("op") or ">=").strip()
+    if group_op not in NUMERIC_OPS:
+        group_op = ">="
+
+    detail_mode = str(cfg.get("detail") or "summary").lower()
+    if detail_mode not in ("summary", "rows"):
+        detail_mode = "summary"
 
     logic = str(cfg.get("logic") or "or").lower()
     if logic not in ("and", "or"):
@@ -99,6 +126,15 @@ def normalize(cfg: dict | None) -> dict:
         "logic": logic,
         "conditions": conditions,
         "cooldown_minutes": max(0, cooldown),
+        # ---- 分组统计（mode = group）----
+        "group_field": str(cfg.get("group_field") or "").strip(),
+        "func": func,
+        "value_field": str(cfg.get("value_field") or "").strip(),
+        # 汇总模式只留统计字段和指标，带一个「附带字段」（比如区县）才好 @人 和区分
+        "extra_field": str(cfg.get("extra_field") or "").strip(),
+        "op": group_op,
+        "value": cfg.get("value"),
+        "detail": detail_mode,
     }
 
 
@@ -107,6 +143,13 @@ def describe(cfg: dict | None) -> str:
     trigger = normalize(cfg)
     if trigger["mode"] == "always":
         return MODE_LABELS["always"]
+
+    if trigger["mode"] == "group":
+        field = trigger["group_field"] or "（未选字段）"
+        label = GROUP_FUNC_LABELS[trigger["func"]]
+        metric = label if trigger["func"] == "count" else f"{trigger['value_field'] or '（未选字段）'}{label}"
+        op = OP_LABELS.get(trigger["op"], trigger["op"])
+        return f"{field} 的{metric} {op} {trigger['value']}"
 
     parts = []
     for item in trigger["conditions"]:
@@ -178,10 +221,16 @@ def match_row(row: dict, conditions: list[dict], logic: str) -> bool:
     return any(results)
 
 
-def evaluate(rows: list[dict], cfg: dict | None) -> TriggerResult:
-    """对取数结果做触发判定，返回命中行。"""
+def evaluate(rows: list[dict], cfg: dict | None, columns: list | None = None) -> TriggerResult:
+    """对取数结果做触发判定，返回命中行。
+
+    columns 是取数结果的列名，分组统计要靠它判断字段在不在、以及拼出结果列。
+    """
     trigger = normalize(cfg)
     total = len(rows)
+
+    if trigger["mode"] == "group":
+        return _evaluate_group(rows, trigger, columns)
 
     if trigger["mode"] == "always":
         summary = f"{total} 行全部发送" if total else "无数据"
@@ -241,6 +290,157 @@ def evaluate(rows: list[dict], cfg: dict | None) -> TriggerResult:
         summary=summary,
         warnings=warnings,
         detail=detail,
+    )
+
+
+def _text_of(row: dict, field: str) -> str:
+    value = row.get(field)
+    return "" if value is None else str(value).strip()
+
+
+def _first_value(rows: list[dict], indexes: list[int], field: str) -> str:
+    """取一组行里第一个非空的附带字段值，用来标出这组数据属于哪个区县。"""
+    for index in indexes:
+        value = _text_of(rows[index], field)
+        if value:
+            return value
+    return ""
+
+
+def _display(number: float | int | None):
+    """3.0 显示成 3，别让表格里出现一堆小数点后一位。"""
+    if number is None:
+        return ""
+    value = float(number)
+    if value.is_integer():
+        return int(value)
+    return round(value, 2)
+
+
+def _group_metric(rows: list[dict], indexes: list[int], func: str, value_field: str) -> float | None:
+    """算一个分组在当前这轮数据里的统计值。"""
+    if func == "count":
+        return float(len(indexes))
+
+    if func == "count_distinct":
+        values = {_text_of(rows[i], value_field) for i in indexes}
+        values.discard("")
+        return float(len(values))
+
+    numbers = [_to_number(rows[i].get(value_field)) for i in indexes]
+    numbers = [n for n in numbers if n is not None]
+    if not numbers:
+        return None
+    if func == "sum":
+        return float(sum(numbers))
+    if func == "avg":
+        return float(sum(numbers)) / len(numbers)
+    if func == "max":
+        return float(max(numbers))
+    if func == "min":
+        return float(min(numbers))
+    return None
+
+
+def _evaluate_group(rows: list[dict], trigger: dict, columns: list | None) -> TriggerResult:
+    """分组统计：按某个字段把数据归堆，算一个简单指标，达到标准的组才发出去。
+
+    「同一个小区退服 ≥ 3 次」「某个区县故障合计时长 ≥ 600 分钟」都是它。
+    """
+    total = len(rows)
+    field = trigger["group_field"]
+    func = trigger["func"]
+    value_field = trigger["value_field"]
+    extra_field = trigger["extra_field"]
+    threshold = _to_number(trigger["value"])
+
+    source_columns = list(columns or (list(rows[0].keys()) if rows else []))
+    warnings: list[str] = []
+
+    if not field:
+        warnings.append("分组统计没选统计字段，已按「不发送」处理")
+    elif source_columns and field not in source_columns:
+        warnings.append(f"统计字段「{field}」不在取数结果里，本次不发送")
+    if extra_field and source_columns and extra_field not in source_columns:
+        warnings.append(f"附带字段「{extra_field}」不在取数结果里，本次不发送")
+    if threshold is None:
+        warnings.append("分组统计没填标准值，已按「不发送」处理")
+    if func != "count" and not value_field:
+        warnings.append("这个统计方式要选一个数值字段，本次不发送")
+    if func != "count" and value_field and source_columns and value_field not in source_columns:
+        warnings.append(f"数值字段「{value_field}」不在取数结果里，本次不发送")
+
+    if warnings:
+        return TriggerResult(
+            hit=False, rows=[], total=total, summary="触发条件无效", warnings=warnings
+        )
+
+    metric_label = GROUP_FUNC_LABELS[func]
+    metric_column = metric_label if func == "count" else f"{value_field}{metric_label}"
+
+    buckets: dict[str, list[int]] = {}
+    order: list[str] = []
+    for index, row in enumerate(rows):
+        key = _text_of(row, field)
+        if not key:
+            continue
+        if key not in buckets:
+            buckets[key] = []
+            order.append(key)
+        buckets[key].append(index)
+
+    hits: list[tuple[str, list[int], float]] = []
+    for key in order:
+        indexes = buckets[key]
+        metric = _group_metric(rows, indexes, func, value_field)
+        if metric is None:
+            continue
+        if _compare(metric, trigger["op"], threshold):
+            hits.append((key, indexes, metric))
+    hits.sort(key=lambda item: item[2], reverse=True)
+
+    if trigger["detail"] == "rows":
+        # 明细模式：把命中组的原始行都发出去，并在每行后面附上该组的统计值
+        picked = []
+        for key, indexes, metric in hits:
+            for index in indexes:
+                row = dict(rows[index])
+                row[metric_column] = _display(metric)
+                picked.append((index, row))
+        picked.sort(key=lambda item: item[0])
+        out_rows = [row for _, row in picked]
+        out_columns = [*source_columns, metric_column]
+        # 明细模式发出来的每一行都来自命中组，所以整张表都是命中行
+        hit_indexes = list(range(len(out_rows)))
+    else:
+        # 汇总模式：一个值一行，只看「谁、多少次」
+        out_rows = []
+        for key, indexes, metric in hits:
+            row = {field: key, metric_column: _display(metric)}
+            if extra_field:
+                row[extra_field] = _first_value(rows, indexes, extra_field)
+            out_rows.append(row)
+        out_columns = ([extra_field] if extra_field else []) + [field, metric_column]
+        hit_indexes = list(range(len(out_rows)))
+
+    condition = describe(trigger)
+    if hits:
+        summary = f"{len(hits)} 个{field}达到标准（共 {total} 行）：{condition}"
+    else:
+        summary = f"没有{field}达到标准（共 {total} 行）：{condition}"
+
+    return TriggerResult(
+        hit=bool(hits),
+        rows=out_rows,
+        hit_indexes=hit_indexes,
+        total=total,
+        summary=summary,
+        warnings=warnings,
+        columns=out_columns,
+        detail=[
+            {"field": field, "func": func, "value_field": value_field,
+             "op": trigger["op"], "value": trigger["value"], "label": condition}
+        ],
     )
 
 

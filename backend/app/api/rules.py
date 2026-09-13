@@ -230,8 +230,11 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
 
         # 触发判定：表格里展示全部取数结果，但只有命中行会真正发出去
         trigger_cfg = trigger.normalize(cfg.get("trigger"))
-        outcome = trigger.evaluate(rows, trigger_cfg)
+        outcome = trigger.evaluate(rows, trigger_cfg, columns)
         hit_rows = outcome.rows
+        if outcome.columns:
+            # 分组统计会自己算出一列（比如「出现次数」），列名要跟着一起换
+            columns = outcome.columns
         hit_set = set(outcome.hit_indexes)
 
         image_cfg = dict(payload.image or {})
@@ -287,6 +290,12 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
             trigger_warnings.append(
                 f"触发条件：{trigger.describe(trigger_cfg)}"
                 f"；命中 {outcome.hit_count} / {outcome.total} 行，只有命中行会发送"
+            )
+        elif trigger_cfg["mode"] == "group":
+            trigger_warnings.append(
+                f"触发条件：{trigger.describe(trigger_cfg)}"
+                f"；命中 {outcome.hit_count} 个对象 / 共 {outcome.total} 行，"
+                "只有达到标准的对象会发送"
             )
 
         return {

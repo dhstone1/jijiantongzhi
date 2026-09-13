@@ -62,16 +62,13 @@ def _region_variant_map() -> dict[str, list[str]]:
     return mapping
 
 
-def build_demo_business_db() -> None:
-    if DEMO_DB_PATH.exists():
-        return
-
+def _write_synthetic_tables(conn) -> None:
+    """生成三张合成演示表，时间以当前为基准；重复执行会整表重建。"""
     rng = random.Random(20260910)
     variants = _region_variant_map()
     standards = [item[0] for item in DEFAULT_REGIONS]
     now = datetime.now().replace(minute=0, second=0, microsecond=0)
 
-    conn = sqlite3.connect(DEMO_DB_PATH)
     cur = conn.cursor()
 
     cur.execute("DROP TABLE IF EXISTS 移动网故障通报")
@@ -140,10 +137,19 @@ def build_demo_business_db() -> None:
     )
     alarms = []
     reasons = ["传输故障", "市电停电", "设备复位", "光缆中断", "板卡故障", "软件异常"]
+    # 留一批「反复出问题」的小区，最近 24 小时集中在它们身上，
+    # 这样「同一小区告警 ≥ 3 次」之类的规则能取到真实样例。
+    repeat_pool = [
+        (rng.choice(variants[rng.choice(standards)]), rng.randint(1, 60)) for _ in range(15)
+    ]
     for index in range(600):
         standard = rng.choice(standards)
         name = rng.choice(variants[standard])
+        base_no = rng.randint(1, 60)
         occurred = now - timedelta(hours=rng.randint(0, 240), minutes=rng.randint(0, 59))
+        if index % 4 == 0:
+            name, base_no = repeat_pool[index % len(repeat_pool)]
+            occurred = now - timedelta(hours=rng.randint(0, 23), minutes=rng.randint(0, 59))
         duration = rng.randint(3, 600)
         alarms.append(
             (
@@ -154,9 +160,9 @@ def build_demo_business_db() -> None:
                 rng.choice(["中兴", "华为", "爱立信"]),
                 rng.choice(["4G", "5G"]),
                 rng.choice(["Eutrancell", "NRCell"]),
-                f"XT{name}基站{rng.randint(1, 60)}",
+                f"XT{name}基站{base_no}",
                 rng.choice(["A类基站", "B类基站", "C类基站"]),
-                f"XT{name}基站{rng.randint(1, 60)}-{rng.randint(1, 9)}-share",
+                f"XT{name}基站{base_no}-{rng.randint(1, 9)}-share",
                 occurred.strftime("%Y-%m-%d %H:%M:%S"),
                 (occurred + timedelta(minutes=duration)).strftime("%Y-%m-%d %H:%M:%S"),
                 rng.choice(reasons),
@@ -167,9 +173,53 @@ def build_demo_business_db() -> None:
     cur.executemany("INSERT INTO 基站告警明细 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", alarms)
 
     conn.commit()
-    conn.close()
-    logger.info("演示业务库已生成：%s", DEMO_DB_PATH)
     _ = index
+
+
+def build_demo_business_db() -> None:
+    if DEMO_DB_PATH.exists():
+        return
+    conn = sqlite3.connect(DEMO_DB_PATH)
+    try:
+        _write_synthetic_tables(conn)
+    finally:
+        conn.close()
+    logger.info("演示业务库已生成：%s", DEMO_DB_PATH)
+
+
+# 演示库比当前时间旧 6 小时以上才滚动，避免每次重启都把数据往前挪
+DEMO_ROLL_STALE_SECONDS = 6 * 3600
+
+
+def _demo_age_seconds(conn) -> int | None:
+    """演示库最新一条告警距现在多久（秒）；表不存在或时间取不出来就返回 None。"""
+    cur = conn.cursor()
+    tables = {row[0] for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if DEMO_ALARM_TABLE not in tables:
+        return None
+    age = cur.execute(
+        f"SELECT strftime('%s','now') - strftime('%s', MAX(发生时间)) FROM {DEMO_ALARM_TABLE}"
+    ).fetchone()[0]
+    return None if age is None else int(age)
+
+
+def refresh_demo_business_db() -> None:
+    """演示库是「生成那一刻」造的，放几天之后「最近 24 小时」就什么都查不到。
+
+    检测到数据过期就按当前时间重建三张合成表，样例规则才一直有数据可取。
+    只动合成表，用户自己导入到同一个库里的表不受影响。
+    """
+    if not DEMO_DB_PATH.exists():
+        return
+    conn = sqlite3.connect(DEMO_DB_PATH)
+    try:
+        age = _demo_age_seconds(conn)
+        if age is not None and age <= DEMO_ROLL_STALE_SECONDS:
+            return
+        _write_synthetic_tables(conn)
+        logger.info("演示业务库已按当前时间重建")
+    finally:
+        conn.close()
 
 
 def ensure_datasource(db) -> None:
@@ -246,52 +296,76 @@ def ensure_demo_rule(db) -> None:
 DEMO_ALERT_RULE_NAME = "小区重复告警提醒（示例）"
 
 
+def demo_alert_query() -> dict:
+    """演示规则「同一字段累计达到标准」的取数与触发配置。
+
+    select 只取原始字段，分组和计数交给触发条件自己算，比「分组汇总 + 阈值」两步走简短得多。
+    """
+    return {
+        "mode": "builder",
+        "table": DEMO_ALARM_TABLE,
+        "select": ["区县", "小区名称", "发生时间", "处理时长_分钟"],
+        "filters": [],
+        "group_by": [],
+        "aggregations": [],
+        "order_by": [],
+        "time_range": {"type": "last_n_hours", "field": "发生时间", "n": 24},
+        "limit": 1000,
+        "empty_action": "skip",
+        "normalize_region": True,
+        "highlight": {"field": "出现次数", "op": ">=", "value": 3, "color": "#FF0000"},
+        "trigger": {
+            "mode": "group",
+            "group_field": "小区名称",
+            "extra_field": "区县",
+            "func": "count",
+            "op": ">=",
+            "value": 3,
+            "detail": "summary",
+            "cooldown_minutes": 120,
+        },
+    }
+
+
+def _upgrade_demo_alert_rule(db, rule) -> None:
+    """演示规则还停在新旧交替的写法上时，升级成当前版本。
+
+    只认我们自己写出来的两种形态：老的「分组汇总 + 阈值」，以及没带附带字段的分组统计。
+    用户自己改过的配置一律不动。
+    """
+    try:
+        old = json.loads(rule.query_json or "{}")
+    except ValueError:
+        return
+    trigger_cfg = old.get("trigger") or {}
+    mode = trigger_cfg.get("mode")
+    if mode == "group" and "extra_field" in trigger_cfg:
+        return
+    if mode not in ("threshold", "group"):
+        return
+    refreshed = demo_alert_query()
+    refreshed["time_range"] = old.get("time_range") or refreshed["time_range"]
+    rule.query_json = json.dumps(refreshed, ensure_ascii=False)
+    rule.table_name = DEMO_ALARM_TABLE
+    db.commit()
+    logger.info("已升级演示告警规则为「同一字段累计达到标准」：%s", DEMO_ALERT_RULE_NAME)
+
+
 def ensure_demo_alert_rule(db) -> None:
-    """补一条「阈值触发」演示规则。
+    """补一条「同一字段累计达到标准」演示规则。
 
     每次启动都检查一次，缺失才补，所以老库升级上来也能看到新功能的样例。
     """
     exists = db.query(PushRule).filter(PushRule.name == DEMO_ALERT_RULE_NAME).first()
     if exists is not None:
+        _upgrade_demo_alert_rule(db, exists)
         return
 
     datasource = db.query(DataSource).order_by(DataSource.id).first()
     if datasource is None:
         return
 
-    query = {
-        "mode": "builder",
-        "table": DEMO_ALARM_TABLE,
-        "select": ["区县", "小区名称"],
-        "filters": [],
-        "group_by": ["区县", "小区名称"],
-        "aggregations": [
-            {"func": "count", "column": "告警流水号", "alias": "告警次数"},
-            {
-                "func": "duration_max",
-                "from": "发生时间",
-                "to": "清除时间",
-                "unit": "minute",
-                "open_means_now": True,
-                "alias": "最长时长分钟",
-            },
-        ],
-        "order_by": [{"column": "告警次数", "direction": "desc"}],
-        "time_range": {"type": "last_n_hours", "field": "发生时间", "n": 24},
-        "limit": 50,
-        "empty_action": "skip",
-        "normalize_region": True,
-        "highlight": {"field": "告警次数", "op": ">=", "value": 3, "color": "#FF0000"},
-        "trigger": {
-            "mode": "threshold",
-            "logic": "or",
-            "cooldown_minutes": 120,
-            "conditions": [
-                {"field": "告警次数", "op": ">=", "value": 3},
-                {"field": "最长时长分钟", "op": ">=", "value": 240},
-            ],
-        },
-    }
+    query = demo_alert_query()
     template = (
         "#### 小区重复告警提醒\n"
         "> 统计范围：最近 24 小时\n\n"
@@ -328,6 +402,7 @@ def ensure_seed() -> None:
     try:
         ensure_regions(db)
         build_demo_business_db()
+        refresh_demo_business_db()
         ensure_datasource(db)
         ensure_staff(db)
         ensure_demo_rule(db)

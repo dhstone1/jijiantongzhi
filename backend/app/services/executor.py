@@ -220,7 +220,7 @@ def run_rule(
 
         # ---- 触发判定：报表类原样通过，告警类只保留命中的行 ----
         trigger_cfg = query_cfg.get("trigger") or {}
-        outcome = trigger_engine.evaluate(rows, trigger_cfg)
+        outcome = trigger_engine.evaluate(rows, trigger_cfg, columns)
         result["warnings"].extend(outcome.warnings)
         result["trigger"] = {
             "mode": trigger_engine.normalize(trigger_cfg)["mode"],
@@ -237,6 +237,9 @@ def run_rule(
             return result
 
         rows = outcome.rows
+        if outcome.columns:
+            # 分组统计会自己算出一列（比如「出现次数」），列名要跟着一起换
+            columns = outcome.columns
         result["rows"] = rows
 
         # ---- 冷却：同一条告警在冷却期内不重复推送 ----
