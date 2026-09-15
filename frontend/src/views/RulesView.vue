@@ -13,6 +13,21 @@
     <div class="panel">
       <div class="panel-body tight">
         <el-table :data="rules" v-loading="loading" style="width: 100%">
+          <template #empty>
+            <div class="empty-hint">
+              <template v-if="store.isAdmin">还没有推送规则，点右上角「新建规则」开始配置。</template>
+              <template v-else-if="store.isCityAdmin">
+                还没看到规则。你只能看到本地市（{{ store.user?.region_name || '—' }}）的规则，
+                归属地为「全部归属地」的规则由省级管理员维护。
+              </template>
+              <template v-else>
+                还没看到规则。你只能看到自己归属地（{{ store.user?.region_name || '—' }}）的规则。
+              </template>
+              <div v-if="store.canManageRules" class="empty-action">
+                <el-link type="primary" @click="router.push({ name: 'rule-new' })">立即创建</el-link>
+              </div>
+            </div>
+          </template>
           <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip>
             <template #default="{ row }">
               <div class="rule-name">
@@ -77,11 +92,6 @@
               <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
-          <template #empty>
-            <div class="empty">
-              还没有推送规则。<el-link type="primary" @click="router.push({ name: 'rule-new' })">立即创建</el-link>
-            </div>
-          </template>
         </el-table>
       </div>
     </div>
@@ -255,6 +265,20 @@ async function remove(row) {
   font-size: 12px;
   color: #b54708;
   line-height: 1.8;
+}
+
+.empty-hint {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 18px 0;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.9;
+  color: var(--ink-500);
+}
+
+.empty-action {
+  margin-top: 6px;
 }
 </style>
 

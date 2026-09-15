@@ -69,6 +69,8 @@ class DingTalkBot(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
+    # 这个群归哪个地市管。省级管理员能看全部，地市管理员只看本地的
+    region_name: Mapped[str] = mapped_column(String(64), default="", index=True)
     webhook_enc: Mapped[str] = mapped_column(Text, default="")
     secret_enc: Mapped[str] = mapped_column(Text, default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)

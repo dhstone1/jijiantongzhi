@@ -43,6 +43,9 @@ DEFAULT_REGIONS: list[tuple[str, str, list[str]]] = [
     ("邢台市", "邢台", ["全市", "市区"]),
 ]
 
+# 河北省 → 邢台市 → 18 个区县。省级管理员的归属地挂在省上，
+# 地市管理员的归属地挂在地市上，往字典里加地市即可扩展。
+PROVINCE = "河北省"
 PARENT_CITY = "邢台市"
 
 # 汇总行关键词：这些行不是真实的归属地明细，参与明细时应排除
@@ -122,6 +125,17 @@ class RegionNormalizer:
             self.alias_map[strip_suffix(clean(standard))] = standard
             self.standard_names.append(standard)
             self.aliases[standard] = sorted(filter(None, {short, *extra} - {standard}))
+
+    def add_region(self, standard: str, short: str = "", aliases: list[str] | None = None) -> None:
+        """补一个还没进字典的归属地（例如省级）。"""
+        if standard in self.aliases:
+            return
+        names = {standard, short, *(aliases or [])}
+        for name in filter(None, names):
+            self.alias_map[clean(name)] = standard
+        self.alias_map[strip_suffix(clean(standard))] = standard
+        self.standard_names.append(standard)
+        self.aliases[standard] = sorted(filter(None, {short, *(aliases or [])} - {standard}))
 
     @classmethod
     def from_db(cls, db: Session) -> "RegionNormalizer":

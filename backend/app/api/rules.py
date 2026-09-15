@@ -21,6 +21,7 @@ from ..services import (
     renderer,
     sample_parser,
     scheduler,
+    scope,
     trigger,
 )
 from ..services.region_norm import RegionNormalizer
@@ -75,13 +76,28 @@ def _resolve_caller(db: Session, mobile: str) -> Staff | None:
 
 @router.get("/rules")
 def list_rules(mobile: str = Query(""), db: Session = Depends(get_db)):
-    query = db.query(PushRule)
     caller = _resolve_caller(db, mobile)
-    if caller is not None and caller.role != "admin":
-        # 非管理员只能看到自己归属地的规则
-        query = query.filter(PushRule.region_name == caller.region_name)
-    rules = query.order_by(PushRule.id.desc()).all()
+    rules = db.query(PushRule).order_by(PushRule.id.desc()).all()
+    if caller is not None and not scope.is_province(caller.role):
+        # 地市管理员看本地市 + 下属区县的规则；普通人员看自己归属地的规则
+        rules = [r for r in rules if scope.can_see_region(_caller_scope(db, caller), r.region_name)]
     return [_to_dict(rule) for rule in rules]
+
+
+def _caller_scope(db: Session, caller: Staff) -> set[str] | None:
+    return scope.caller_scope(db, caller.role, caller.region_name)
+
+
+def _guard_rule_write(db: Session, caller: Staff | None, rule: PushRule) -> None:
+    """规则写权限：普通人员不能改；非省级只能动自己作用域内的规则。"""
+    if caller is None:
+        return
+    if scope.is_province(caller.role):
+        return
+    if not scope.is_city(caller.role):
+        raise HTTPException(status_code=403, detail="普通人员不能修改推送规则")
+    if not scope.can_see_region(_caller_scope(db, caller), rule.region_name):
+        raise HTTPException(status_code=403, detail="无权修改其他归属地的规则")
 
 
 @router.get("/rules/{rule_id}")
@@ -95,7 +111,14 @@ def get_rule(rule_id: int, db: Session = Depends(get_db)):
 @router.post("/rules")
 def create_rule(payload: RuleIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     caller = _resolve_caller(db, mobile)
-    region_name = payload.region_name or (caller.region_name if caller and caller.role != "admin" else "")
+    if caller is not None and not scope.can_manage_region(caller.role):
+        raise HTTPException(status_code=403, detail="普通人员不能新建推送规则")
+    region_name = payload.region_name or ""
+    if caller is not None and not scope.is_province(caller.role):
+        # 非省级只能把规则挂在自己作用域内的归属地；不填或填了别处，一律落到自己归属地
+        allowed = _caller_scope(db, caller) or set()
+        if region_name not in allowed:
+            region_name = caller.region_name
 
     rule = PushRule(
         name=payload.name,
@@ -131,8 +154,12 @@ def update_rule(rule_id: int, payload: RuleIn, mobile: str = Query(""), db: Sess
         raise HTTPException(status_code=404, detail="规则不存在")
 
     caller = _resolve_caller(db, mobile)
-    if caller is not None and caller.role != "admin" and rule.region_name and rule.region_name != caller.region_name:
-        raise HTTPException(status_code=403, detail="无权修改其他归属地的规则")
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = _caller_scope(db, caller) or set()
+        if not scope.can_see_region(allowed, rule.region_name):
+            raise HTTPException(status_code=403, detail="无权修改其他归属地的规则")
+        if payload.region_name and payload.region_name not in allowed:
+            raise HTTPException(status_code=403, detail="只能把规则挂到本地市的归属地")
 
     rule.name = payload.name
     rule.data_source_id = payload.data_source_id
@@ -159,10 +186,11 @@ def update_rule(rule_id: int, payload: RuleIn, mobile: str = Query(""), db: Sess
 
 
 @router.delete("/rules/{rule_id}")
-def delete_rule(rule_id: int, db: Session = Depends(get_db)):
+def delete_rule(rule_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     rule = db.get(PushRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="规则不存在")
+    _guard_rule_write(db, _resolve_caller(db, mobile), rule)
     try:
         scheduler.scheduler.remove_job(f"rule_{rule_id}")
     except Exception:  # noqa: BLE001
@@ -173,10 +201,11 @@ def delete_rule(rule_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/rules/{rule_id}/toggle")
-def toggle_rule(rule_id: int, db: Session = Depends(get_db)):
+def toggle_rule(rule_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     rule = db.get(PushRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="规则不存在")
+    _guard_rule_write(db, _resolve_caller(db, mobile), rule)
     rule.enabled = not rule.enabled
     db.commit()
     scheduler.sync_rule(rule)
@@ -184,10 +213,11 @@ def toggle_rule(rule_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/rules/{rule_id}/run")
-def run_rule_now(rule_id: int, db: Session = Depends(get_db)):
+def run_rule_now(rule_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     rule = db.get(PushRule, rule_id)
     if rule is None:
         raise HTTPException(status_code=404, detail="规则不存在")
+    _guard_rule_write(db, _resolve_caller(db, mobile), rule)
     return executor.run_rule(db, rule, trigger="manual")
 
 
@@ -214,7 +244,8 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
             table_columns,
             metadata.get_engine(ds),
             region_field=payload.region_field,
-            region_value=payload.region_name,
+            # 归属地挂在地市上时，连带下属区县一起取，跟正式发送保持一致
+            region_value=scope.region_filter_value(db, payload.region_name),
             normalizer=normalizer,
             max_rows=payload.limit,
         )
@@ -272,15 +303,16 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
 
         rendered = ""
         render_warnings: list[str] = []
-        if payload.template:
-            rendered, render_warnings = renderer.render_template(
-                payload.template,
-                hit_rows,
-                columns,
-                highlight=cfg.get("highlight") or None,
-                suppress_table=suppress_table,
-                table_style=renderer.resolve_table_style(payload.msg_type, payload.query),
-            )
+        # 模板留空时跟正式发送一样退回默认模板，不然预览会是一片空白
+        template = payload.template or renderer.default_template("数据通报", columns)
+        rendered, render_warnings = renderer.render_template(
+            template,
+            hit_rows,
+            columns,
+            highlight=cfg.get("highlight") or None,
+            suppress_table=suppress_table,
+            table_style=renderer.resolve_table_style(payload.msg_type, payload.query),
+        )
         if suppress_table:
             render_warnings.append("已开启图片发送，文字部分只保留标题和说明，不再重复发数据表")
             if image_store.upload_mode(db) == image_store.MODE_BEEIMG:

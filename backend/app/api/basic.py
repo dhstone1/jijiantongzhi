@@ -15,9 +15,16 @@ from ..models import DingTalkBot, Region, ResourcePermission, Staff
 from ..schemas import BotIn, LoginIn, RegionIn, SettingsIn, StaffIn, PermissionGrantIn
 from ..security import decrypt, encrypt, mask
 from ..services import dingtalk, image_store
+from ..services import scope
 from ..services.region_norm import DEFAULT_REGIONS, PARENT_CITY, RegionNormalizer
 
 router = APIRouter()
+
+
+def _resolve_caller(db: Session, mobile: str) -> Staff | None:
+    if not mobile:
+        return None
+    return db.query(Staff).filter(Staff.mobile == mobile).first()
 
 
 # ---------------------------------------------------------------- 身份识别
@@ -29,21 +36,33 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
     staff = db.query(Staff).filter(Staff.mobile == mobile).first()
     if staff is None:
         raise HTTPException(status_code=404, detail="该手机号未在人员信息表中登记，请联系管理员")
+    role = scope.normalize_role(staff.role)
+    scope_names = scope.caller_scope(db, role, staff.region_name)
     return {
         "name": staff.name,
         "mobile": staff.mobile,
         "region_name": staff.region_name,
-        "role": staff.role,
+        "role": role,
+        "role_label": scope.role_label(role),
+        "menus": scope.menus_of(role),
+        # None = 不限（省级管理员），否则是「自己 + 全部下级」的归属地列表
+        "scope_regions": sorted(scope_names) if scope_names is not None else None,
         "position": staff.position,
-        "is_admin": staff.role == "admin",
+        "is_admin": scope.is_province(role),
+        "is_city_admin": scope.is_city(role),
     }
 
 
 # ---------------------------------------------------------------- 归属地字典
 
 @router.get("/regions")
-def list_regions(db: Session = Depends(get_db)):
+def list_regions(mobile: str = Query(""), db: Session = Depends(get_db)):
+    """归属地字典。地市管理员只看到本地市及下属区县，普通人员只能看自己那一条。"""
+    caller = _resolve_caller(db, mobile) if mobile else None
     items = db.query(Region).order_by(Region.sort_order, Region.id).all()
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        items = [item for item in items if item.standard_name in allowed]
     return [
         {
             "id": item.id,
@@ -59,9 +78,16 @@ def list_regions(db: Session = Depends(get_db)):
 
 
 @router.post("/regions")
-def create_region(payload: RegionIn, db: Session = Depends(get_db)):
+def create_region(payload: RegionIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     if db.query(Region).filter(Region.standard_name == payload.standard_name).first():
         raise HTTPException(status_code=400, detail="该归属地已存在")
+    caller = _resolve_caller(db, mobile) if mobile else None
+    _require_region_manager(_caller_role(caller))
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        # 地市管理员只能在本地市下面加区县，parent 必须落在自己作用域里
+        if (payload.parent or "").strip() not in allowed:
+            raise HTTPException(status_code=403, detail="只能在自己地市下面新增归属地")
     region = Region(
         standard_name=payload.standard_name,
         short_name=payload.short_name,
@@ -77,10 +103,18 @@ def create_region(payload: RegionIn, db: Session = Depends(get_db)):
 
 
 @router.put("/regions/{region_id}")
-def update_region(region_id: int, payload: RegionIn, db: Session = Depends(get_db)):
+def update_region(region_id: int, payload: RegionIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     region = db.get(Region, region_id)
     if region is None:
         raise HTTPException(status_code=404, detail="归属地不存在")
+    caller = _resolve_caller(db, mobile) if mobile else None
+    _require_region_manager(_caller_role(caller))
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        if region.standard_name not in allowed:
+            raise HTTPException(status_code=403, detail="无权修改其他地市的归属地")
+        if region.standard_name in scope.PROTECTED_REGIONS:
+            raise HTTPException(status_code=403, detail=f"「{region.standard_name}」由省级维护，地市不能改")
     region.standard_name = payload.standard_name
     region.short_name = payload.short_name
     region.parent = payload.parent
@@ -93,10 +127,16 @@ def update_region(region_id: int, payload: RegionIn, db: Session = Depends(get_d
 
 
 @router.delete("/regions/{region_id}")
-def delete_region(region_id: int, db: Session = Depends(get_db)):
+def delete_region(region_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     region = db.get(Region, region_id)
     if region is None:
         raise HTTPException(status_code=404, detail="归属地不存在")
+    caller = _resolve_caller(db, mobile) if mobile else None
+    _require_region_manager(_caller_role(caller))
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        if region.standard_name not in allowed or region.standard_name in scope.PROTECTED_REGIONS:
+            raise HTTPException(status_code=403, detail="只能删除本地市下面的归属地")
     db.delete(region)
     db.commit()
     return {"ok": True}
@@ -131,44 +171,105 @@ def _staff_dict(item: Staff) -> dict:
         "name": item.name,
         "mobile": item.mobile,
         "region_name": item.region_name,
-        "role": item.role,
+        "role": scope.normalize_role(item.role),
+        "role_label": scope.role_label(item.role),
         "position": item.position,
         "receive_alert": item.receive_alert,
     }
 
 
+def _caller_role(caller: Staff | None) -> str | None:
+    return scope.normalize_role(caller.role) if caller is not None else None
+
+
+def _caller_region(caller: Staff | None) -> str:
+    return (caller.region_name or "").strip() if caller is not None else ""
+
+
+def _guard_staff_write(db, caller_role, caller_region, region_name, role) -> None:
+    """人员信息的写权限：普通人员不能改；地市管理员只能动本地市的人，
+    而且不能给自己或别人提成省级管理员（那是省级的事）。
+
+    参数刻意收成纯值而不是 ORM 对象：改自己的时候 caller 和 staff 是同一个对象，
+    拿对象进来会在赋完新角色后把自己认成省级，直接放行。
+    """
+    if caller_role is None:
+        return
+    if scope.is_province(caller_role):
+        return
+    if not scope.is_city(caller_role):
+        raise HTTPException(status_code=403, detail="普通人员不能修改人员信息")
+    allowed = scope.caller_scope(db, caller_role, caller_region) or set()
+    if (region_name or "").strip() not in allowed:
+        raise HTTPException(status_code=403, detail="只能维护本地市的人员")
+    if scope.is_province(role):
+        raise HTTPException(status_code=403, detail="省级管理员只能由省级设置")
+
+
+def _require_region_manager(caller_role: str | None) -> None:
+    """归属地字典 / 钉钉群的写操作：省级和地市管理员才能动。"""
+    if caller_role is None:
+        return
+    if not scope.can_manage_region(caller_role):
+        raise HTTPException(status_code=403, detail="普通人员不能修改这类配置")
+
+
 @router.get("/staff")
-def list_staff(db: Session = Depends(get_db)):
+def list_staff(mobile: str = Query(""), db: Session = Depends(get_db)):
+    """人员信息。省级管理员看全部，地市管理员只看本地市的，普通人员只看自己。"""
     items = db.query(Staff).order_by(Staff.id).all()
+    caller = _resolve_caller(db, mobile)
+    if caller is not None:
+        if scope.is_province(caller.role):
+            pass
+        elif scope.is_city(caller.role):
+            allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+            items = [item for item in items if (item.region_name or "").strip() in allowed]
+        else:
+            items = [item for item in items if item.mobile == caller.mobile]
     return [_staff_dict(item) for item in items]
 
 
 @router.post("/staff")
-def create_staff(payload: StaffIn, db: Session = Depends(get_db)):
+def create_staff(payload: StaffIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     if db.query(Staff).filter(Staff.mobile == payload.mobile).first():
         raise HTTPException(status_code=400, detail="该手机号已存在")
-    staff = Staff(**payload.model_dump())
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller))
+    data = payload.model_dump()
+    data["role"] = scope.normalize_role(data.get("role"))
+    staff = Staff(**data)
+    _guard_staff_write(db, _caller_role(caller), _caller_region(caller), staff.region_name, staff.role)
     db.add(staff)
     db.commit()
     return {"id": staff.id}
 
 
 @router.put("/staff/{staff_id}")
-def update_staff(staff_id: int, payload: StaffIn, db: Session = Depends(get_db)):
+def update_staff(staff_id: int, payload: StaffIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     staff = db.get(Staff, staff_id)
     if staff is None:
         raise HTTPException(status_code=404, detail="人员不存在")
-    for key, value in payload.model_dump().items():
+    caller = _resolve_caller(db, mobile)
+    data = payload.model_dump()
+    data["role"] = scope.normalize_role(data.get("role"))
+    # 原来的归属地也要在作用域内，否则能把外地人「骗」进自己的列表
+    caller_role, caller_region = _caller_role(caller), _caller_region(caller)
+    _guard_staff_write(db, caller_role, caller_region, staff.region_name, staff.role)
+    for key, value in data.items():
         setattr(staff, key, value)
+    _guard_staff_write(db, caller_role, caller_region, data.get("region_name"), data.get("role"))
     db.commit()
     return {"ok": True}
 
 
 @router.delete("/staff/{staff_id}")
-def delete_staff(staff_id: int, db: Session = Depends(get_db)):
+def delete_staff(staff_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     staff = db.get(Staff, staff_id)
     if staff is None:
         raise HTTPException(status_code=404, detail="人员不存在")
+    caller = _resolve_caller(db, mobile)
+    _guard_staff_write(db, _caller_role(caller), _caller_region(caller), staff.region_name, staff.role)
     db.delete(staff)
     db.commit()
     return {"ok": True}
@@ -264,10 +365,16 @@ def list_bots(mobile: str = Query(""), db: Session = Depends(get_db)):
             )
             query = query.filter(or_(~DingTalkBot.id.in_(granted), DingTalkBot.id.in_(mine)))
     items = query.order_by(DingTalkBot.id).all()
+    caller = _resolve_caller(db, mobile)
+    if caller is not None and not scope.is_province(caller.role):
+        # 地市管理员只看到本地市建的群；归属地为空的群是全省共用的，只给省级看
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        items = [item for item in items if (item.region_name or "").strip() in allowed]
     return [
         {
             "id": item.id,
             "name": item.name,
+            "region_name": item.region_name,
             "webhook": mask(decrypt(item.webhook_enc)),
             "has_secret": bool(item.secret_enc),
             "is_active": item.is_active,
@@ -280,11 +387,20 @@ def list_bots(mobile: str = Query(""), db: Session = Depends(get_db)):
 
 
 @router.post("/bots")
-def create_bot(payload: BotIn, db: Session = Depends(get_db)):
+def create_bot(payload: BotIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     if db.query(DingTalkBot).filter(DingTalkBot.name == payload.name).first():
         raise HTTPException(status_code=400, detail="该名称已存在")
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller))
+    region_name = (payload.region_name or "").strip()
+    if caller is not None and not scope.is_province(caller.role):
+        # 地市管理员建的群自动挂到本地市，不能挂到别处，也不能建全省共用的群
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        if region_name not in allowed:
+            region_name = caller.region_name
     bot = DingTalkBot(
         name=payload.name,
+        region_name=region_name,
         webhook_enc=encrypt(payload.webhook),
         secret_enc=encrypt(payload.secret),
         is_active=payload.is_active,
@@ -295,11 +411,20 @@ def create_bot(payload: BotIn, db: Session = Depends(get_db)):
 
 
 @router.put("/bots/{bot_id}")
-def update_bot(bot_id: int, payload: BotIn, db: Session = Depends(get_db)):
+def update_bot(bot_id: int, payload: BotIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     bot = db.get(DingTalkBot, bot_id)
     if bot is None:
         raise HTTPException(status_code=404, detail="机器人不存在")
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller))
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        if (bot.region_name or "").strip() not in allowed:
+            raise HTTPException(status_code=403, detail="无权修改其他地市的钉钉群")
+        if (payload.region_name or "").strip() not in allowed:
+            raise HTTPException(status_code=403, detail="只能把群挂到本地市的归属地")
     bot.name = payload.name
+    bot.region_name = (payload.region_name or "").strip()
     bot.is_active = payload.is_active
     # 前端回显的是脱敏值，只有真正改动时才覆盖
     if payload.webhook and "*" not in payload.webhook:
@@ -311,10 +436,16 @@ def update_bot(bot_id: int, payload: BotIn, db: Session = Depends(get_db)):
 
 
 @router.delete("/bots/{bot_id}")
-def delete_bot(bot_id: int, db: Session = Depends(get_db)):
+def delete_bot(bot_id: int, mobile: str = Query(""), db: Session = Depends(get_db)):
     bot = db.get(DingTalkBot, bot_id)
     if bot is None:
         raise HTTPException(status_code=404, detail="机器人不存在")
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller))
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        if (bot.region_name or "").strip() not in allowed:
+            raise HTTPException(status_code=403, detail="无权删除其他地市的钉钉群")
     db.delete(bot)
     db.commit()
     return {"ok": True}

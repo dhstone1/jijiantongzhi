@@ -37,6 +37,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "image_json": "TEXT DEFAULT '{}'",
         "card_json": "TEXT DEFAULT '{}'",
     },
+    "dingtalk_bot": {
+        "region_name": "VARCHAR(64) DEFAULT ''",
+    },
 }
 
 

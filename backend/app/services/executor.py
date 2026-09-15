@@ -13,6 +13,7 @@ from ..config import MAX_ROWS_HARD_LIMIT
 from ..models import DataSource, DingTalkBot, PushRule, SendLog, Staff
 from ..security import decrypt
 from . import dingtalk, image_host, image_renderer, image_store, metadata, renderer
+from . import scope as scope_service
 # 注意：run_rule 的形参也叫 trigger，模块必须用别名，否则会被遮蔽
 from . import trigger as trigger_engine
 from .region_norm import RegionNormalizer
@@ -213,8 +214,11 @@ def run_rule(
         query_cfg = load_query(rule)
         image_cfg = load_image_config(rule)
 
-        # 归属地：规则自身绑定的归属地优先，否则用当前访客的归属地
-        region_value = rule.region_name or identity_region or ""
+        # 归属地：规则自身绑定的归属地优先，否则用当前访客的归属地。
+        # 挂在地市上的规则要连带下属区县一起取，所以这里展开成作用域。
+        region_value = scope_service.region_filter_value(
+            db, rule.region_name or identity_region or ""
+        )
 
         columns, rows, warnings = execute_query(
             db, ds, query_cfg, rule.region_field, region_value, normalizer

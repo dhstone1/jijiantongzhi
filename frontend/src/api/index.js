@@ -16,22 +16,38 @@ http.interceptors.response.use(
   },
 )
 
+// 后端没有登录态，所有需要按归属地收敛的接口都靠这个手机号识别调用者。
+// 这里统一带上，免得每个调用点都要记得传一次。
+const USER_KEY = 'jijiantongzhi.user'
+
+function currentMobile() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || 'null')?.mobile || ''
+  } catch {
+    return ''
+  }
+}
+
+function withMe(params = {}) {
+  return { mobile: currentMobile(), ...params }
+}
+
 export const api = {
   // 身份
   login: (mobile) => http.post('/session/login', { mobile }),
 
   // 归属地
-  listRegions: () => http.get('/regions'),
-  createRegion: (data) => http.post('/regions', data),
-  updateRegion: (id, data) => http.put(`/regions/${id}`, data),
-  deleteRegion: (id) => http.delete(`/regions/${id}`),
+  listRegions: () => http.get('/regions', { params: withMe() }),
+  createRegion: (data) => http.post('/regions', data, { params: withMe() }),
+  updateRegion: (id, data) => http.put(`/regions/${id}`, data, { params: withMe() }),
+  deleteRegion: (id) => http.delete(`/regions/${id}`, { params: withMe() }),
   checkRegions: (values) => http.post('/regions/check', { values }),
 
   // 人员
-  listStaff: () => http.get('/staff'),
-  createStaff: (data) => http.post('/staff', data),
-  updateStaff: (id, data) => http.put(`/staff/${id}`, data),
-  deleteStaff: (id) => http.delete(`/staff/${id}`),
+  listStaff: () => http.get('/staff', { params: withMe() }),
+  createStaff: (data) => http.post('/staff', data, { params: withMe() }),
+  updateStaff: (id, data) => http.put(`/staff/${id}`, data, { params: withMe() }),
+  deleteStaff: (id) => http.delete(`/staff/${id}`, { params: withMe() }),
   importStaff: (file) => {
     const form = new FormData()
     form.append('file', file)
@@ -39,14 +55,14 @@ export const api = {
   },
 
   // 钉钉
-  listBots: (mobile) => http.get('/bots', { params: { mobile } }),
-  createBot: (data) => http.post('/bots', data),
-  updateBot: (id, data) => http.put(`/bots/${id}`, data),
-  deleteBot: (id) => http.delete(`/bots/${id}`),
+  listBots: (mobile) => http.get('/bots', { params: withMe({ mobile: mobile ?? currentMobile() }) }),
+  createBot: (data) => http.post('/bots', data, { params: withMe() }),
+  updateBot: (id, data) => http.put(`/bots/${id}`, data, { params: withMe() }),
+  deleteBot: (id) => http.delete(`/bots/${id}`, { params: withMe() }),
   testBot: (id) => http.post(`/bots/${id}/test`, {}),
 
   // 数据源
-  listDatasources: (mobile) => http.get('/datasources', { params: { mobile } }),
+  listDatasources: (mobile) => http.get('/datasources', { params: withMe({ mobile: mobile ?? currentMobile() }) }),
   createDatasource: (data) => http.post('/datasources', data),
   updateDatasource: (id, data) => http.put(`/datasources/${id}`, data),
   deleteDatasource: (id) => http.delete(`/datasources/${id}`),
@@ -70,9 +86,9 @@ export const api = {
   getRule: (id) => http.get(`/rules/${id}`),
   createRule: (data, mobile) => http.post('/rules', data, { params: { mobile } }),
   updateRule: (id, data, mobile) => http.put(`/rules/${id}`, data, { params: { mobile } }),
-  deleteRule: (id) => http.delete(`/rules/${id}`),
-  toggleRule: (id) => http.post(`/rules/${id}/toggle`),
-  runRule: (id) => http.post(`/rules/${id}/run`),
+  deleteRule: (id) => http.delete(`/rules/${id}`, { params: withMe() }),
+  toggleRule: (id) => http.post(`/rules/${id}/toggle`, {}, { params: withMe() }),
+  runRule: (id) => http.post(`/rules/${id}/run`, {}, { params: withMe() }),
   previewRule: (data) => http.post('/rules/preview', data),
   suggestTemplate: (data) => http.post('/rules/suggest-template', data),
   parseSample: (file, dataSourceId) => {
@@ -89,9 +105,9 @@ export const api = {
   testImageHost: () => http.post('/settings/test-image-host'),
 
   // 记录
-  listLogs: (params) => http.get('/logs', { params }),
-  getLog: (id) => http.get(`/logs/${id}`),
-  resendLog: (id) => http.post(`/logs/${id}/resend`),
+  listLogs: (params) => http.get('/logs', { params: withMe(params) }),
+  getLog: (id) => http.get(`/logs/${id}`, { params: withMe() }),
+  resendLog: (id) => http.post(`/logs/${id}/resend`, {}, { params: withMe() }),
   stats: (mobile) => http.get('/stats', { params: { mobile } }),
 }
 

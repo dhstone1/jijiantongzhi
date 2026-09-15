@@ -49,11 +49,11 @@
             </div>
             <div class="field">
               <label>归属地</label>
-              <el-select v-model="form.region_name" placeholder="全部归属地" clearable filterable>
-                <el-option label="全部归属地（不按归属地过滤）" value="" />
+              <el-select v-model="form.region_name" placeholder="请选择归属地" clearable filterable>
+                <el-option v-if="store.isAdmin" label="全部归属地（不按归属地过滤）" value="" />
                 <el-option v-for="r in regions" :key="r.id" :label="r.standard_name" :value="r.standard_name" />
               </el-select>
-              <div class="hint">非管理员只能看到自己归属地的规则。</div>
+              <div class="hint">{{ regionHint }}</div>
             </div>
             <div class="field">
               <label>推送形式</label>
@@ -1188,6 +1188,14 @@ const pushStyleHint = computed(() =>
     ? '把结果画成一张 PNG 发到群里，手机上不用左右滑动。'
     : '把数据当成表格发到群里，一条消息里带完整的行列。',
 )
+
+const regionHint = computed(() => {
+  if (store.isAdmin) return '留空表示不按归属地过滤，全省数据都取；选了归属地就只取那一片。'
+  if (store.isCityAdmin) {
+    return `只能挂到本地市的归属地（当前：${store.user?.region_name || '—'}）。挂地市会把下属区县一起取。`
+  }
+  return '普通人员只能看本地市的规则。'
+})
 
 const isActionCard = computed(() => form.msg_type === 'actionCard')
 

@@ -13,7 +13,8 @@ from datetime import datetime, timedelta
 from .config import DEMO_DB_PATH
 from .db import SessionLocal
 from .models import DataSource, PushRule, Region, Staff
-from .services.region_norm import DEFAULT_REGIONS, PARENT_CITY
+from .services import scope
+from .services.region_norm import DEFAULT_REGIONS, PARENT_CITY, PROVINCE
 
 logger = logging.getLogger("jijiantongzhi.seed")
 
@@ -22,13 +23,16 @@ DEMO_SUMMARY_TABLE = "移动网故障通报"
 DEMO_DETAIL_TABLE = "当日移动网故障"
 DEMO_ALARM_TABLE = "基站告警明细"
 
+DEMO_CITY_ADMIN_MOBILE = "13900000006"
+
 DEMO_STAFF = [
     ("张伟", "13900000001", "襄都区", "user", "网络运营"),
     ("李强", "13900000002", "信都区", "user", "网络运营"),
     ("王芳", "13900000003", "内丘县", "user", "网络运营"),
     ("赵敏", "13900000004", "宁晋县", "user", "网络运营"),
     ("刘洋", "13900000005", "沙河市", "user", "网络运营"),
-    ("陈静", "13900000000", "", "admin", "系统管理员"),
+    ("陈静", "13900000000", scope.PROVINCE_REGION, "province_admin", "系统管理员"),
+    ("孙磊", DEMO_CITY_ADMIN_MOBILE, "邢台市", "city_admin", "地市管理员"),
 ]
 
 
@@ -36,13 +40,24 @@ def ensure_regions(db) -> int:
     if db.query(Region).count() > 0:
         return 0
     created = 0
+    db.add(
+        Region(
+            standard_name=PROVINCE,
+            short_name="河北",
+            parent="",
+            level="省",
+            aliases_json=json.dumps(["河北"], ensure_ascii=False),
+            sort_order=-1,
+        )
+    )
+    created += 1
     for order, (standard, short, aliases) in enumerate(DEFAULT_REGIONS):
         is_city = standard == PARENT_CITY
         db.add(
             Region(
                 standard_name=standard,
                 short_name=short,
-                parent="" if is_city else PARENT_CITY,
+                parent=PROVINCE if is_city else PARENT_CITY,
                 level="市" if is_city else "区县",
                 aliases_json=json.dumps(aliases, ensure_ascii=False),
                 sort_order=order,
@@ -52,6 +67,38 @@ def ensure_regions(db) -> int:
     db.commit()
     logger.info("已写入 %d 条归属地字典", created)
     return created
+
+
+def ensure_region_hierarchy(db) -> None:
+    """老库补省级这一层：没有河北省就建一个，地市的 parent 指到省上。
+
+    幂等，每次启动都跑，不会覆盖用户改过的配置。
+    """
+    changed = False
+    province = db.query(Region).filter(Region.standard_name == PROVINCE).first()
+    if province is None:
+        db.add(
+            Region(
+                standard_name=PROVINCE,
+                short_name="河北",
+                parent="",
+                level="省",
+                aliases_json=json.dumps(["河北"], ensure_ascii=False),
+                sort_order=-1,
+            )
+        )
+        changed = True
+    # 顶级且不是省本身的，就是地市，挂到省下面
+    for item in db.query(Region).all():
+        if item.standard_name == PROVINCE:
+            continue
+        if not (item.parent or "").strip():
+            item.parent = PROVINCE
+            item.level = item.level or "市"
+            changed = True
+    if changed:
+        db.commit()
+        logger.info("已补齐归属地层级（省 → 市 → 区县）")
 
 
 def _region_variant_map() -> dict[str, list[str]]:
@@ -245,6 +292,38 @@ def ensure_staff(db) -> None:
     db.commit()
 
 
+def ensure_staff_roles(db) -> None:
+    """老库补角色：admin 归到省级管理员，归属地落到省上；顺带补一个演示地市管理员。"""
+    changed = False
+    for item in db.query(Staff).all():
+        role = scope.normalize_role(item.role)
+        if item.role != role:
+            item.role = role
+            changed = True
+        if role == scope.ROLE_PROVINCE and (item.region_name or "").strip() != scope.PROVINCE_REGION:
+            item.region_name = scope.PROVINCE_REGION
+            changed = True
+    # 演示用：还没有地市管理员时补一个，方便验证新角色的可见范围
+    if (
+        db.query(Staff).filter(Staff.role == scope.ROLE_CITY).first() is None
+        and db.query(Staff).filter(Staff.mobile == DEMO_CITY_ADMIN_MOBILE).first() is None
+        and db.query(Staff).filter(Staff.mobile == "13900000000").first() is not None
+    ):
+        db.add(
+            Staff(
+                name="孙磊",
+                mobile=DEMO_CITY_ADMIN_MOBILE,
+                region_name=PARENT_CITY,
+                role=scope.ROLE_CITY,
+                position="地市管理员",
+            )
+        )
+        changed = True
+    if changed:
+        db.commit()
+        logger.info("已更新人员角色与归属地")
+
+
 def ensure_demo_rule(db) -> None:
     if db.query(PushRule).count() > 0:
         return
@@ -401,10 +480,12 @@ def ensure_seed() -> None:
     db = SessionLocal()
     try:
         ensure_regions(db)
+        ensure_region_hierarchy(db)
         build_demo_business_db()
         refresh_demo_business_db()
         ensure_datasource(db)
         ensure_staff(db)
+        ensure_staff_roles(db)
         ensure_demo_rule(db)
         ensure_demo_alert_rule(db)
     finally:

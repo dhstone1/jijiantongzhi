@@ -20,6 +20,10 @@ AGG_FUNCS = {"sum", "avg", "count", "max", "min"}
 # 归属地过滤时额外接受的别名上限，防止 IN 列表过长
 MAX_REGION_VARIANTS = 24
 
+# 作用域可能是「一个地市 + 它的所有区县」，别名要一起带上，所以整片区域的
+# 写法总量单独给一个上限。
+MAX_SCOPE_VARIANTS = 400
+
 
 @dataclass
 class BuiltQuery:
@@ -39,6 +43,24 @@ def region_variants(standard: str, normalizer: RegionNormalizer) -> list[str]:
         if standard.endswith(suffix) and len(standard) > len(suffix):
             variants.add(standard[: -len(suffix)])
     return sorted(v for v in variants if v)[:MAX_REGION_VARIANTS]
+
+
+def region_scope_variants(names, normalizer: RegionNormalizer | None) -> list[str]:
+    """把作用域里的每个标准名展开成它在库里可能出现的全部写法。
+
+    names 可以是单个字符串，也可以是「地市 + 下属区县」这样的集合。
+    """
+    if isinstance(names, str):
+        names = [names]
+    variants: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        if normalizer is None:
+            variants.add(name)
+        else:
+            variants.update(region_variants(name, normalizer))
+    return sorted(v for v in variants if v)[:MAX_SCOPE_VARIANTS]
 
 
 def resolve_time_range(cfg: dict, now: datetime | None = None) -> tuple[datetime | None, datetime | None]:
@@ -92,7 +114,7 @@ def build_query(
     table_columns: list[str],
     engine,
     region_field: str = "",
-    region_value: str = "",
+    region_value: str | list[str] | set[str] = "",
     normalizer: RegionNormalizer | None = None,
     max_rows: int = 200,
 ) -> BuiltQuery:
@@ -250,7 +272,7 @@ def _build_where(
     cfg: dict,
     table_columns: list[str],
     region_field: str,
-    region_value: str,
+    region_value: str | list[str] | set[str],
     normalizer: RegionNormalizer | None,
     params: dict,
     warnings: list[str],
@@ -270,14 +292,20 @@ def _build_where(
         if region_field not in table_columns:
             warnings.append(f"归属地字段「{region_field}」不在所选表中，未生效")
         else:
-            variants = region_variants(region_value, normalizer) if normalizer else [region_value]
+            variants = region_scope_variants(region_value, normalizer)
             keys = []
             for index, variant in enumerate(variants):
                 key = f"_region_{index}"
                 params[key] = variant
                 keys.append(f":{key}")
             where.append(f"{preparer.quote(region_field)} IN ({', '.join(keys)})")
-            if len(variants) > 1:
+            scope_size = len(region_value) if not isinstance(region_value, str) else 1
+            if scope_size > 1:
+                warnings.append(
+                    f"归属地按 {scope_size} 个行政区的 {len(variants)} 种写法匹配"
+                    "（含下属区县与别名）"
+                )
+            elif len(variants) > 1:
                 warnings.append(f"归属地按 {len(variants)} 种写法匹配（含别名）")
 
     # --- 用户自定义条件 ---
@@ -404,7 +432,7 @@ def _is_duration(agg: dict) -> bool:
 def _build_raw(
     cfg: dict,
     region_field: str,
-    region_value: str,
+    region_value: str | list[str] | set[str],
     normalizer: RegionNormalizer | None,
     max_rows: int,
     preparer,
@@ -425,7 +453,7 @@ def _build_raw(
     if region_field and region_value:
         if "{region}" not in raw:
             raise ValueError("自定义 SQL 必须包含 {region} 占位符，系统需要据此注入归属地过滤")
-        variants = region_variants(region_value, normalizer) if normalizer else [region_value]
+        variants = region_scope_variants(region_value, normalizer)
         keys = []
         for index, variant in enumerate(variants):
             key = f"_region_{index}"

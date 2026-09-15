@@ -43,6 +43,8 @@ class StaffIn(BaseModel):
 
 class BotIn(BaseModel):
     name: str
+    # 这个群归哪个地市管；省级管理员留空表示全省共用
+    region_name: str = ""
     webhook: str = ""
     secret: str = ""
     is_active: bool = True

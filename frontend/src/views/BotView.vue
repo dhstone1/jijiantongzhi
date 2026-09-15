@@ -25,6 +25,12 @@
       <div class="panel-body tight">
         <el-table :data="items" v-loading="loading" style="width: 100%">
           <el-table-column prop="name" label="群名称" min-width="160" />
+          <el-table-column label="归属地" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="row.region_name" size="small" effect="plain">{{ row.region_name }}</el-tag>
+              <span v-else class="muted">全省共用</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="webhook" label="Webhook" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
               <span class="mono">{{ row.webhook }}</span>
@@ -67,6 +73,15 @@
           <el-form label-width="100px" label-position="left">
             <el-form-item label="群名称">
               <el-input v-model="form.name" placeholder="例如：网络运营日报群" />
+            </el-form-item>
+            <el-form-item label="归属地">
+              <el-select v-model="form.region_name" placeholder="全省共用" clearable filterable style="width: 100%">
+                <el-option v-if="store.isAdmin" label="全省共用（不绑定地市）" value="" />
+                <el-option v-for="r in regions" :key="r.id" :label="r.standard_name" :value="r.standard_name" />
+              </el-select>
+              <div class="hint">
+                群挂在哪个地市名下，那个地市的管理员就能看到并维护它。省级管理员可以留空表示全省共用。
+              </div>
             </el-form-item>
             <el-form-item label="Webhook">
               <el-input
@@ -127,15 +142,21 @@ const editing = ref(null)
 const activeTab = ref('basic')
 const staffList = ref([])
 const permittedMobiles = ref([])
+const regions = ref([])
 
-const form = reactive({ name: '', webhook: '', secret: '', is_active: true })
+const form = reactive({ name: '', region_name: '', webhook: '', secret: '', is_active: true })
 
 onMounted(load)
 
 async function load() {
   loading.value = true
   try {
-    items.value = await api.listBots(store.user?.mobile)
+    const [bots, regionList] = await Promise.all([
+      api.listBots(store.user?.mobile),
+      api.listRegions(),
+    ])
+    items.value = bots
+    regions.value = regionList
   } finally {
     loading.value = false
   }
@@ -146,6 +167,7 @@ function openDialog(row) {
   activeTab.value = 'basic'
   Object.assign(form, {
     name: row?.name || '',
+    region_name: row?.region_name || '',
     webhook: row?.webhook || '',
     secret: '',
     is_active: row?.is_active ?? true,

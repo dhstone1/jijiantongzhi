@@ -13,7 +13,10 @@
       </div>
 
       <h1 class="title">输入手机号进入</h1>
-      <p class="desc">系统根据人员信息表识别你的归属地，你只会看到本归属地的数据。</p>
+      <p class="desc">
+        系统根据人员信息表识别你的身份和归属地。省级管理员看全省，地市管理员看本地市，
+        普通人员只看自己归属地。
+      </p>
 
       <el-form @submit.prevent="handleLogin">
         <el-input
@@ -69,9 +72,9 @@ const loading = ref(false)
 const errorText = ref('')
 
 const demos = [
-  { name: '陈静', region: '管理员 · 可见全部归属地', mobile: '13900000000' },
-  { name: '张伟', region: '襄都区', mobile: '13900000001' },
-  { name: '赵敏', region: '宁晋县', mobile: '13900000004' },
+  { name: '陈静', region: '省级管理员 · 河北省', mobile: '13900000000' },
+  { name: '孙磊', region: '地市管理员 · 邢台市', mobile: '13900000006' },
+  { name: '张伟', region: '普通人员 · 襄都区', mobile: '13900000001' },
 ]
 
 function fill(value) {
@@ -267,4 +270,3 @@ async function handleLogin() {
   margin-top: 10px;
 }
 </style>
-
