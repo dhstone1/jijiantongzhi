@@ -1203,14 +1203,14 @@ const pushStyleHint = computed(() =>
 
 const tableStyles = [
   { value: 'md', label: '标准表格（钉钉按表格渲染，长内容会自动折行）' },
-  { value: 'code', label: '代码块表格（等宽不折行，长内容可左右滑动）' },
+  { value: 'code', label: '带框线表格（等宽不折行，内容完整，可左右滑动）' },
   { value: 'plain', label: '纯文本对齐（靠空格对齐，列宽收敛到 40 字）' },
 ]
 
 const tableStyleHint = computed(() => {
   if (form.msg_type === 'text') return '纯文本消息不做 Markdown 渲染，实际按纯文本对齐发送。'
   if (form.query.table_style === 'code') {
-    return '内容再长也不折行、不截断，在钉钉里可以左右滑动看全；代价是列宽不随屏幕变，列多时要滑。'
+    return '用 + - | 画框线的等宽表格，内容不折行不截断，列宽跟着内容走，在钉钉里可以左右滑动看全；代价是列多时要滑。'
   }
   if (form.query.table_style === 'plain') {
     return '超过 40 字的单元格会截断成省略号，只在必须发纯文本时用。'
