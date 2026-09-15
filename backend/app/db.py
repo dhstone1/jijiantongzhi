@@ -28,12 +28,17 @@ def get_db() -> Iterator[Session]:
         db.close()
 
 
-# 建表之后新增的列，写在这里做轻量迁移：
+# 建表之后新增的列，写在这里做轻量迁移。
 # create_all 只管建新表，不会给已存在的表补列。
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "push_rule": {
+        "send_excel": "BOOLEAN DEFAULT 0",
         "last_fired_at": "TIMESTAMP",
         "image_json": "TEXT DEFAULT '{}'",
+        "card_json": "TEXT DEFAULT '{}'",
+    },
+    "dingtalk_bot": {
+        "region_name": "VARCHAR(64) DEFAULT ''",
     },
 }
 
@@ -60,4 +65,3 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _migrate_columns()
-

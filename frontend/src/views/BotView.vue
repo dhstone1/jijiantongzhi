@@ -25,6 +25,12 @@
       <div class="panel-body tight">
         <el-table :data="items" v-loading="loading" style="width: 100%">
           <el-table-column prop="name" label="群名称" min-width="160" />
+          <el-table-column label="归属地" width="120">
+            <template #default="{ row }">
+              <el-tag v-if="row.region_name" size="small" effect="plain">{{ row.region_name }}</el-tag>
+              <span v-else class="muted">全省共用</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="webhook" label="Webhook" min-width="220" show-overflow-tooltip>
             <template #default="{ row }">
               <span class="mono">{{ row.webhook }}</span>
@@ -61,24 +67,57 @@
       </div>
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="editing ? '编辑钉钉群' : '添加钉钉群'" width="600px">
-      <el-form label-width="100px" label-position="left">
-        <el-form-item label="群名称">
-          <el-input v-model="form.name" placeholder="例如：网络运营日报群" />
-        </el-form-item>
-        <el-form-item label="Webhook">
-          <el-input
-            v-model="form.webhook"
-            type="textarea"
-            :rows="2"
-            placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
-          />
-        </el-form-item>
-        <el-form-item label="加签密钥">
-          <el-input v-model="form.secret" type="password" show-password placeholder="SEC 开头，留空表示不修改" />
-          <div class="hint">机器人安全设置选择「加签」时才需要填写。</div>
-        </el-form-item>
-      </el-form>
+    <el-dialog v-model="dialogVisible" :title="editing ? '编辑钉钉群' : '添加钉钉群'" width="620px">
+      <el-tabs v-model="activeTab">
+        <el-tab-pane label="基础信息" name="basic">
+          <el-form label-width="100px" label-position="left">
+            <el-form-item label="群名称">
+              <el-input v-model="form.name" placeholder="例如：网络运营日报群" />
+            </el-form-item>
+            <el-form-item label="归属地">
+              <el-select v-model="form.region_name" placeholder="全省共用" clearable filterable style="width: 100%">
+                <el-option v-if="store.isAdmin" label="全省共用（不绑定地市）" value="" />
+                <el-option v-for="r in regions" :key="r.id" :label="r.standard_name" :value="r.standard_name" />
+              </el-select>
+              <div class="hint">
+                群挂在哪个地市名下，那个地市的管理员就能看到并维护它。省级管理员可以留空表示全省共用。
+              </div>
+            </el-form-item>
+            <el-form-item label="Webhook">
+              <el-input
+                v-model="form.webhook"
+                type="textarea"
+                :rows="2"
+                placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+              />
+            </el-form-item>
+            <el-form-item label="加签密钥">
+              <el-input v-model="form.secret" type="password" show-password placeholder="SEC 开头，留空表示不修改" />
+              <div class="hint">机器人安全设置选择「加签」时才需要填写。</div>
+            </el-form-item>
+          </el-form>
+        </el-tab-pane>
+        <el-tab-pane v-if="store.isAdmin" label="可见权限" name="perm">
+          <div class="hint" style="margin-bottom: 10px">
+            一个都不勾表示所有人在「推送规则」里都能选到这个群；勾选后只有这些人员能看到。
+          </div>
+          <el-select
+            v-model="permittedMobiles"
+            multiple
+            filterable
+            clearable
+            placeholder="搜索姓名或手机号"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="person in staffList"
+              :key="person.key"
+              :label="person.label"
+              :value="person.key"
+            />
+          </el-select>
+        </el-tab-pane>
+      </el-tabs>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
@@ -89,24 +128,35 @@
 
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
+import { useUserStore } from '../stores/user'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api'
 
+const store = useUserStore()
 const items = ref([])
 const loading = ref(false)
 const testing = ref(null)
 const saving = ref(false)
 const dialogVisible = ref(false)
 const editing = ref(null)
+const activeTab = ref('basic')
+const staffList = ref([])
+const permittedMobiles = ref([])
+const regions = ref([])
 
-const form = reactive({ name: '', webhook: '', secret: '', is_active: true })
+const form = reactive({ name: '', region_name: '', webhook: '', secret: '', is_active: true })
 
 onMounted(load)
 
 async function load() {
   loading.value = true
   try {
-    items.value = await api.listBots()
+    const [bots, regionList] = await Promise.all([
+      api.listBots(store.user?.mobile),
+      api.listRegions(),
+    ])
+    items.value = bots
+    regions.value = regionList
   } finally {
     loading.value = false
   }
@@ -114,11 +164,21 @@ async function load() {
 
 function openDialog(row) {
   editing.value = row || null
+  activeTab.value = 'basic'
   Object.assign(form, {
     name: row?.name || '',
+    region_name: row?.region_name || '',
     webhook: row?.webhook || '',
     secret: '',
     is_active: row?.is_active ?? true,
+  })
+  permittedMobiles.value = []
+  Promise.all([
+    api.listStaff(),
+    row ? api.listPermissions('dingtalk_bot', row.id) : [],
+  ]).then(([staff, perms]) => {
+    staffList.value = staff.map((s) => ({ key: s.mobile, label: s.name + '(' + s.mobile + ')' }))
+    permittedMobiles.value = perms.map((p) => p.mobile)
   })
   dialogVisible.value = true
 }
@@ -128,13 +188,18 @@ async function save() {
   if (!editing.value && !form.webhook.trim()) return ElMessage.warning('请填写 Webhook 地址')
   saving.value = true
   try {
+    let botId = editing.value?.id
     if (editing.value) {
-      await api.updateBot(editing.value.id, { ...form })
-      ElMessage.success('已保存')
+      await api.updateBot(botId, { ...form })
     } else {
-      await api.createBot({ ...form })
-      ElMessage.success('已创建')
+      botId = (await api.createBot({ ...form })).id
     }
+    await api.grantPermissions({
+      resource_type: 'dingtalk_bot',
+      resource_id: botId,
+      mobiles: permittedMobiles.value,
+    })
+    ElMessage.success(editing.value ? '已保存' : '已创建')
     dialogVisible.value = false
     load()
   } finally {

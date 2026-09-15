@@ -6,9 +6,37 @@ const http = axios.create({
   timeout: 60000,
 })
 
+// 后端没有登录态，所有 /api 请求都要带一个已登记的手机号，否则一律 401。
+// 放在拦截器里统一注入，免得某个调用点忘了传。
+const USER_KEY = 'jijiantongzhi.user'
+
+function currentMobile() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || 'null')?.mobile || ''
+  } catch {
+    return ''
+  }
+}
+
+http.interceptors.request.use((config) => {
+  const mobile = currentMobile()
+  if (!mobile) return config
+  // 登录接口自己带 body，不需要查询参数
+  if (config.url === '/session/login') return config
+  config.params = { mobile, ...(config.params || {}) }
+  return config
+})
+
 http.interceptors.response.use(
   (response) => response.data,
   (error) => {
+    // 身份失效（被删号 / 换了浏览器）时退回登录页，别让人对着错误发呆
+    if (error?.response?.status === 401) {
+      localStorage.removeItem(USER_KEY)
+      if (!window.location.hash.startsWith('#/login')) {
+        window.location.hash = '#/login'
+      }
+    }
     const detail = error?.response?.data?.detail
     const message = typeof detail === 'string' ? detail : error.message || '请求失败'
     ElMessage.error(message)
@@ -16,37 +44,52 @@ http.interceptors.response.use(
   },
 )
 
+function withMe(params = {}) {
+  return { mobile: currentMobile(), ...params }
+}
+
+// 模板下载要走浏览器原生下载，用 axios 反而拿不到 Content-Disposition 里的文件名
+export function downloadTemplate(kind) {
+  const params = new URLSearchParams({ mobile: currentMobile() })
+  window.location.href = `/api/templates/${kind}?${params.toString()}`
+}
+
 export const api = {
   // 身份
   login: (mobile) => http.post('/session/login', { mobile }),
 
   // 归属地
-  listRegions: () => http.get('/regions'),
-  createRegion: (data) => http.post('/regions', data),
-  updateRegion: (id, data) => http.put(`/regions/${id}`, data),
-  deleteRegion: (id) => http.delete(`/regions/${id}`),
+  listRegions: () => http.get('/regions', { params: withMe() }),
+  createRegion: (data) => http.post('/regions', data, { params: withMe() }),
+  updateRegion: (id, data) => http.put(`/regions/${id}`, data, { params: withMe() }),
+  deleteRegion: (id) => http.delete(`/regions/${id}`, { params: withMe() }),
   checkRegions: (values) => http.post('/regions/check', { values }),
 
   // 人员
-  listStaff: () => http.get('/staff'),
-  createStaff: (data) => http.post('/staff', data),
-  updateStaff: (id, data) => http.put(`/staff/${id}`, data),
-  deleteStaff: (id) => http.delete(`/staff/${id}`),
+  listStaff: () => http.get('/staff', { params: withMe() }),
+  createStaff: (data) => http.post('/staff', data, { params: withMe() }),
+  updateStaff: (id, data) => http.put(`/staff/${id}`, data, { params: withMe() }),
+  deleteStaff: (id) => http.delete(`/staff/${id}`, { params: withMe() }),
   importStaff: (file) => {
     const form = new FormData()
     form.append('file', file)
-    return http.post('/staff/import', form)
+    return http.post('/staff/import', form, { params: withMe() })
+  },
+  importRegions: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post('/regions/import', form, { params: withMe() })
   },
 
   // 钉钉
-  listBots: () => http.get('/bots'),
-  createBot: (data) => http.post('/bots', data),
-  updateBot: (id, data) => http.put(`/bots/${id}`, data),
-  deleteBot: (id) => http.delete(`/bots/${id}`),
+  listBots: (mobile) => http.get('/bots', { params: withMe({ mobile: mobile ?? currentMobile() }) }),
+  createBot: (data) => http.post('/bots', data, { params: withMe() }),
+  updateBot: (id, data) => http.put(`/bots/${id}`, data, { params: withMe() }),
+  deleteBot: (id) => http.delete(`/bots/${id}`, { params: withMe() }),
   testBot: (id) => http.post(`/bots/${id}/test`, {}),
 
   // 数据源
-  listDatasources: () => http.get('/datasources'),
+  listDatasources: (mobile) => http.get('/datasources', { params: withMe({ mobile: mobile ?? currentMobile() }) }),
   createDatasource: (data) => http.post('/datasources', data),
   updateDatasource: (id, data) => http.put(`/datasources/${id}`, data),
   deleteDatasource: (id) => http.delete(`/datasources/${id}`),
@@ -58,14 +101,21 @@ export const api = {
   refreshSchema: (id) => http.post(`/datasources/${id}/refresh`),
   getSchema: (id) => http.get(`/datasources/${id}/schema`),
 
+  // 资源可见权限（数据源 / 钉钉群分别对哪些人可见）
+  listPermissions: (resourceType, resourceId) =>
+    http.get('/permissions', {
+      params: { resource_type: resourceType, resource_id: resourceId },
+    }),
+  grantPermissions: (data) => http.post('/permissions', data),
+
   // 规则
   listRules: (mobile) => http.get('/rules', { params: { mobile } }),
   getRule: (id) => http.get(`/rules/${id}`),
   createRule: (data, mobile) => http.post('/rules', data, { params: { mobile } }),
   updateRule: (id, data, mobile) => http.put(`/rules/${id}`, data, { params: { mobile } }),
-  deleteRule: (id) => http.delete(`/rules/${id}`),
-  toggleRule: (id) => http.post(`/rules/${id}/toggle`),
-  runRule: (id) => http.post(`/rules/${id}/run`),
+  deleteRule: (id) => http.delete(`/rules/${id}`, { params: withMe() }),
+  toggleRule: (id) => http.post(`/rules/${id}/toggle`, {}, { params: withMe() }),
+  runRule: (id) => http.post(`/rules/${id}/run`, {}, { params: withMe() }),
   previewRule: (data) => http.post('/rules/preview', data),
   suggestTemplate: (data) => http.post('/rules/suggest-template', data),
   parseSample: (file, dataSourceId) => {
@@ -82,11 +132,10 @@ export const api = {
   testImageHost: () => http.post('/settings/test-image-host'),
 
   // 记录
-  listLogs: (params) => http.get('/logs', { params }),
-  getLog: (id) => http.get(`/logs/${id}`),
-  resendLog: (id) => http.post(`/logs/${id}/resend`),
+  listLogs: (params) => http.get('/logs', { params: withMe(params) }),
+  getLog: (id) => http.get(`/logs/${id}`, { params: withMe() }),
+  resendLog: (id) => http.post(`/logs/${id}/resend`, {}, { params: withMe() }),
   stats: (mobile) => http.get('/stats', { params: { mobile } }),
 }
 
 export default http
-

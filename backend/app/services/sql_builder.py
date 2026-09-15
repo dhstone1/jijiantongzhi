@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
+from ..config import TRIGGER_SCAN_ROWS
 from .region_norm import RegionNormalizer
 
 ALLOWED_OPS = ("=", "!=", ">", ">=", "<", "<=", "like", "not like", "in", "not in", "between", "is null", "is not null")
@@ -18,6 +19,10 @@ AGG_FUNCS = {"sum", "avg", "count", "max", "min"}
 
 # 归属地过滤时额外接受的别名上限，防止 IN 列表过长
 MAX_REGION_VARIANTS = 24
+
+# 作用域可能是「一个地市 + 它的所有区县」，别名要一起带上，所以整片区域的
+# 写法总量单独给一个上限。
+MAX_SCOPE_VARIANTS = 400
 
 
 @dataclass
@@ -38,6 +43,24 @@ def region_variants(standard: str, normalizer: RegionNormalizer) -> list[str]:
         if standard.endswith(suffix) and len(standard) > len(suffix):
             variants.add(standard[: -len(suffix)])
     return sorted(v for v in variants if v)[:MAX_REGION_VARIANTS]
+
+
+def region_scope_variants(names, normalizer: RegionNormalizer | None) -> list[str]:
+    """把作用域里的每个标准名展开成它在库里可能出现的全部写法。
+
+    names 可以是单个字符串，也可以是「地市 + 下属区县」这样的集合。
+    """
+    if isinstance(names, str):
+        names = [names]
+    variants: set[str] = set()
+    for name in names:
+        if not name:
+            continue
+        if normalizer is None:
+            variants.add(name)
+        else:
+            variants.update(region_variants(name, normalizer))
+    return sorted(v for v in variants if v)[:MAX_SCOPE_VARIANTS]
 
 
 def resolve_time_range(cfg: dict, now: datetime | None = None) -> tuple[datetime | None, datetime | None]:
@@ -91,7 +114,7 @@ def build_query(
     table_columns: list[str],
     engine,
     region_field: str = "",
-    region_value: str = "",
+    region_value: str | list[str] | set[str] = "",
     normalizer: RegionNormalizer | None = None,
     max_rows: int = 200,
 ) -> BuiltQuery:
@@ -162,17 +185,29 @@ def build_query(
             raise ValueError(f"不支持的聚合函数：{func}")
         projections.append(f"{func.upper()}({preparer.quote(agg['column'])}) AS {preparer.quote(alias)}")
 
+    agg_aliases = frozenset(_agg_alias(a) for a in aggregations)
     output_columns = list(select) + [_agg_alias(a) for a in aggregations]
 
     sql = f"SELECT {', '.join(projections)} FROM {preparer.quote(table)}"
-    where, params = _build_where(
-        cfg, table_columns, region_field, region_value, normalizer, params, warnings, preparer
+    # 分组汇总字段（聚合别名）不能写在 WHERE 里，_build_where 会把它们挑出来放进 HAVING
+    where, having, params = _build_where(
+        cfg,
+        table_columns,
+        region_field,
+        region_value,
+        normalizer,
+        params,
+        warnings,
+        preparer,
+        agg_aliases,
     )
     if where:
         sql += " WHERE " + " AND ".join(where)
     if group_by:
         _ensure_columns(group_by, table_columns)
         sql += " GROUP BY " + ", ".join(normalized.get(c) or preparer.quote(c) for c in group_by)
+    if having:
+        sql += " HAVING " + " AND ".join(having)
 
     order_by = [o for o in (cfg.get("order_by") or []) if o.get("column")]
     if order_by:
@@ -186,39 +221,95 @@ def build_query(
         if clauses:
             sql += " ORDER BY " + ", ".join(clauses)
 
-    limit = min(int(cfg.get("limit") or 50), max_rows)
+    limit = effective_limit(cfg, max_rows)
     params["_limit"] = limit
     sql += " LIMIT :_limit"
 
     return BuiltQuery(sql=sql, params=params, warnings=warnings)
 
 
+def effective_limit(cfg: dict, max_rows: int) -> int:
+    """取数上限。
+
+    「最多发送条数」限制的是发出去的行数，不是扫描行数：触发判定（尤其分组统计的
+    「同一个值出现 N 次」）必须在整批数据上算，只取几十行就下结论必然算错。
+    所以判定类规则按 TRIGGER_SCAN_ROWS 取数，真正发出去的行数在外面再截。
+    """
+    limit = max(int(cfg.get("limit") or 50), 1)
+    mode = str((cfg.get("trigger") or {}).get("mode") or "always").lower()
+    if mode in ("threshold", "group"):
+        return min(max(limit, TRIGGER_SCAN_ROWS), max(max_rows, TRIGGER_SCAN_ROWS))
+    return min(limit, max_rows)
+
+
+def _as_number(value):
+    """能当数字用就转成数字，否则原样返回。"""
+    if isinstance(value, bool) or not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return value
+
+
+def _filter_value(value, numeric: bool):
+    """筛选值来自输入框，都是字符串。
+
+    分组汇总的结果（聚合别名）没有字段亲和性，SQLite 里拿它跟字符串比大小会永远判成假，
+    所以 HAVING 的筛选值必须转成真正的数字。
+    """
+    return _as_number(value) if numeric else value
+
+
 def _build_where(
     cfg: dict,
     table_columns: list[str],
     region_field: str,
-    region_value: str,
+    region_value: str | list[str] | set[str],
     normalizer: RegionNormalizer | None,
     params: dict,
     warnings: list[str],
     preparer,
-) -> tuple[list[str], dict]:
-    where: list[str] = []
+    agg_aliases: frozenset[str] = frozenset(),
+) -> tuple[list[str], list[str], dict]:
+    """拆成 WHERE（表字段）和 HAVING（分组汇总算出来的字段）两段条件。
 
-    # --- 归属地过滤：始终第一个条件，任何配置都无法绕过 ---
-    if region_field and region_value:
+    分组汇总的字段（如「告警次数」）在 SQL 里是聚合别名，写在 WHERE 里数据库不认，
+    所以统一放到 HAVING，位置在 GROUP BY 之后。
+    """
+    where: list[str] = []
+    having: list[str] = []
+
+    # --- 归属地过滤：要求过滤就必须真的加上，配不出来直接拒绝 ---
+    # 原来这里是「region_field 为空或不认识这个字段就只写条警告然后放行」，
+    # 等于把「按归属地隔离」变成了尽力而为：随手填个不存在的列名就能读全省。
+    if region_value:
+        if not region_field:
+            raise ValueError("规则没有配归属地字段，无法按归属地取数，请到「归属地字段」里选一个")
         if region_field not in table_columns:
-            warnings.append(f"归属地字段「{region_field}」不在所选表中，未生效")
-        else:
-            variants = region_variants(region_value, normalizer) if normalizer else [region_value]
-            keys = []
-            for index, variant in enumerate(variants):
-                key = f"_region_{index}"
-                params[key] = variant
-                keys.append(f":{key}")
-            where.append(f"{preparer.quote(region_field)} IN ({', '.join(keys)})")
-            if len(variants) > 1:
-                warnings.append(f"归属地按 {len(variants)} 种写法匹配（含别名）")
+            raise ValueError(f"归属地字段「{region_field}」不在所选表中，请重新选择")
+        variants = region_scope_variants(region_value, normalizer)
+        keys = []
+        for index, variant in enumerate(variants):
+            key = f"_region_{index}"
+            params[key] = variant
+            keys.append(f":{key}")
+        where.append(f"{preparer.quote(region_field)} IN ({', '.join(keys)})")
+        scope_size = len(region_value) if not isinstance(region_value, str) else 1
+        if scope_size > 1:
+            warnings.append(
+                f"归属地按 {scope_size} 个行政区的 {len(variants)} 种写法匹配"
+                "（含下属区县与别名）"
+            )
+        elif len(variants) > 1:
+            warnings.append(f"归属地按 {len(variants)} 种写法匹配（含别名）")
 
     # --- 用户自定义条件 ---
     for filter_item in cfg.get("filters") or []:
@@ -226,15 +317,18 @@ def _build_where(
         op = str(filter_item.get("op") or "=").lower().strip()
         if not column or op not in ALLOWED_OPS:
             continue
-        if column not in table_columns:
+        # 分组汇总算出来的字段走 HAVING，其余按表字段走 WHERE
+        in_having = column in agg_aliases
+        if not in_having and column not in table_columns:
             warnings.append(f"忽略不存在的字段条件：{column}")
             continue
 
+        clause = having if in_having else where
         quoted = preparer.quote(column)
         key = f"_f{len(params)}"
 
         if op in ("is null", "is not null"):
-            where.append(f"{quoted} IS {'NOT ' if op == 'is not null' else ''}NULL")
+            clause.append(f"{quoted} IS {'NOT ' if op == 'is not null' else ''}NULL")
         elif op in ("in", "not in"):
             values = filter_item.get("values") or []
             if isinstance(values, str):
@@ -244,22 +338,23 @@ def _build_where(
             keys = []
             for index, value in enumerate(values):
                 sub_key = f"{key}_{index}"
-                params[sub_key] = value
+                params[sub_key] = _filter_value(value, in_having)
                 keys.append(f":{sub_key}")
-            where.append(f"{quoted} {'NOT IN' if op == 'not in' else 'IN'} ({', '.join(keys)})")
+            clause.append(f"{quoted} {'NOT IN' if op == 'not in' else 'IN'} ({', '.join(keys)})")
         elif op == "between":
             start, end = filter_item.get("value"), filter_item.get("value2")
             if start in (None, "") or end in (None, ""):
                 continue
-            params[f"{key}_a"], params[f"{key}_b"] = start, end
-            where.append(f"{quoted} BETWEEN :{key}_a AND :{key}_b")
+            params[f"{key}_a"] = _filter_value(start, in_having)
+            params[f"{key}_b"] = _filter_value(end, in_having)
+            clause.append(f"{quoted} BETWEEN :{key}_a AND :{key}_b")
         else:
             value = filter_item.get("value")
             if value in (None, "") and op not in ("=", "!="):
                 continue
-            params[key] = value
+            params[key] = _filter_value(value, in_having)
             sql_op = "LIKE" if op == "like" else ("NOT LIKE" if op == "not like" else op)
-            where.append(f"{quoted} {sql_op} :{key}")
+            clause.append(f"{quoted} {sql_op} :{key}")
 
     # --- 时间范围 ---
     time_cfg = cfg.get("time_range") or {}
@@ -275,7 +370,7 @@ def _build_where(
     elif time_field:
         warnings.append(f"忽略不存在的时间字段：{time_field}")
 
-    return where, params
+    return where, having, params
 
 
 def duration_expression(
@@ -340,7 +435,7 @@ def _is_duration(agg: dict) -> bool:
 def _build_raw(
     cfg: dict,
     region_field: str,
-    region_value: str,
+    region_value: str | list[str] | set[str],
     normalizer: RegionNormalizer | None,
     max_rows: int,
     preparer,
@@ -358,10 +453,13 @@ def _build_raw(
     warnings: list[str] = []
     params: dict = {}
 
-    if region_field and region_value:
+    if region_value:
+        # 同样改成 fail closed：需要过滤就必须带占位符，且不能再靠占位符的位置
+        # 去猜意图——自定义 SQL 只对省级管理员开放（见 api/rules.py），
+        # 那里的调用者本来就能看全省，所以只保留「必须带占位符」这一条硬性要求。
         if "{region}" not in raw:
             raise ValueError("自定义 SQL 必须包含 {region} 占位符，系统需要据此注入归属地过滤")
-        variants = region_variants(region_value, normalizer) if normalizer else [region_value]
+        variants = region_scope_variants(region_value, normalizer)
         keys = []
         for index, variant in enumerate(variants):
             key = f"_region_{index}"

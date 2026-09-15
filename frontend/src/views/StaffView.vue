@@ -8,9 +8,12 @@
         </p>
       </div>
       <div class="head-actions">
+        <el-button @click="downloadTemplate('staff')">
+          <el-icon><Download /></el-icon> 下载模板
+        </el-button>
         <el-upload :auto-upload="false" :show-file-list="false" accept=".xlsx,.xlsm,.csv" :on-change="handleImport">
           <el-button :loading="importing">
-            <el-icon><Upload /></el-icon> 从 Excel 导入
+            <el-icon><Upload /></el-icon> 按模板导入
           </el-button>
         </el-upload>
         <el-button type="primary" @click="openDialog()">
@@ -24,7 +27,7 @@
       :closable="false"
       show-icon
       title="Excel 导入格式"
-      description="第一行为表头，需要包含「姓名」和「手机号」两列，可选「归属地」「岗位」。归属地会自动按字典归一化，识别不了的会在导入结果里提示。"
+      description="点「下载模板」拿到标准格式，里面第二个工作表写了每列怎么填、第三个工作表列出当前可用的归属地。至少要填「姓名」和「手机号」；归属地匹配不上的、越权的会单独列出来，不会静默丢掉。"
       style="margin-bottom: 16px"
     />
 
@@ -45,8 +48,8 @@
           </el-table-column>
           <el-table-column label="角色" width="110">
             <template #default="{ row }">
-              <el-tag :type="row.role === 'admin' ? 'warning' : 'info'" size="small" effect="light">
-                {{ row.role === 'admin' ? '管理员' : '普通用户' }}
+              <el-tag :type="roleTagType(row.role)" size="small" effect="light">
+                {{ row.role_label || roleLabel(row.role) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -77,17 +80,27 @@
           <el-input v-model="form.mobile" maxlength="11" placeholder="钉钉 @ 人也用这个号码" />
         </el-form-item>
         <el-form-item label="归属地">
-          <el-select v-model="form.region_name" placeholder="全部归属地" clearable filterable style="width: 100%">
-            <el-option label="全部归属地" value="" />
+          <el-select v-model="form.region_name" placeholder="请选择归属地" clearable filterable style="width: 100%">
+            <el-option v-if="store.isAdmin" label="全部归属地（不绑定地市）" value="" />
             <el-option v-for="r in regions" :key="r.id" :label="r.standard_name" :value="r.standard_name" />
           </el-select>
+          <div class="hint">
+            归属地决定这个人能看到哪些数据。省级管理员挂「河北省」，
+            地市管理员挂地市（如邢台市），普通人员挂到区县。
+          </div>
         </el-form-item>
         <el-form-item label="角色">
           <el-radio-group v-model="form.role">
-            <el-radio-button value="user">普通用户</el-radio-button>
-            <el-radio-button value="admin">管理员</el-radio-button>
+            <el-radio-button
+              v-for="option in roleOptions"
+              :key="option.value"
+              :value="option.value"
+              :disabled="option.value === ROLE_PROVINCE && !store.isAdmin"
+            >
+              {{ option.label }}
+            </el-radio-button>
           </el-radio-group>
-          <div class="hint">管理员可以看到全部归属地的数据与规则。</div>
+          <div class="hint">{{ roleHint }}</div>
         </el-form-item>
         <el-form-item label="岗位">
           <el-input v-model="form.position" placeholder="例如：网络运营" />
@@ -105,9 +118,27 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api } from '../api'
+import { api, downloadTemplate } from '../api'
+import { ROLE_CITY, ROLE_OPTIONS, ROLE_PROVINCE, ROLE_USER, useUserStore } from '../stores/user'
+
+const store = useUserStore()
+const roleOptions = ROLE_OPTIONS
+
+const roleHint = computed(
+  () => roleOptions.find((option) => option.value === form.role)?.hint || '',
+)
+
+function roleLabel(role) {
+  return roleOptions.find((option) => option.value === role)?.label || '普通人员'
+}
+
+function roleTagType(role) {
+  if (role === ROLE_PROVINCE) return 'danger'
+  if (role === ROLE_CITY) return 'warning'
+  return 'info'
+}
 
 const items = ref([])
 const regions = ref([])
@@ -144,7 +175,8 @@ function openDialog(row) {
   Object.assign(form, {
     name: row?.name || '',
     mobile: row?.mobile || '',
-    region_name: row?.region_name || '',
+    // 新建时默认落到自己的归属地：地市管理员只能维护本地市的人
+    region_name: row?.region_name || store.user?.region_name || '',
     role: row?.role || 'user',
     position: row?.position || '',
     receive_alert: row?.receive_alert ?? true,
@@ -188,6 +220,9 @@ async function handleImport(uploadFile) {
       message += `；未识别归属地：${result.unknown_regions.join('、')}`
     }
     ElMessage.success(message)
+    if (result.skipped?.length) {
+      ElMessageBox.alert(result.skipped.join('\n'), '这些没导进去', { type: 'warning' })
+    }
     load()
   } finally {
     importing.value = false
@@ -201,4 +236,3 @@ async function handleImport(uploadFile) {
   gap: 8px;
 }
 </style>
-

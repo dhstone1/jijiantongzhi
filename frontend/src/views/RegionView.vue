@@ -9,6 +9,19 @@
         </p>
       </div>
       <div class="head-actions">
+        <el-button @click="downloadTemplate('regions')">
+          <el-icon><Download /></el-icon> 下载模板
+        </el-button>
+        <el-upload
+          :auto-upload="false"
+          :show-file-list="false"
+          accept=".xlsx,.xlsm,.csv"
+          :on-change="handleImport"
+        >
+          <el-button :loading="importing">
+            <el-icon><Upload /></el-icon> 按模板导入
+          </el-button>
+        </el-upload>
         <el-button @click="checkerVisible = true">
           <el-icon><Search /></el-icon> 名称检查
         </el-button>
@@ -67,7 +80,15 @@
           <div class="hint">报表、数据库里出现过的其他写法都填进来，系统过滤时会一并匹配。</div>
         </el-form-item>
         <el-form-item label="上级">
-          <el-input v-model="form.parent" placeholder="例如：邢台市" />
+          <el-select v-model="form.parent" placeholder="留空表示顶层" clearable filterable style="width: 100%">
+            <el-option
+              v-for="item in parentOptions"
+              :key="item.id"
+              :label="item.standard_name"
+              :value="item.standard_name"
+            />
+          </el-select>
+          <div class="hint">填地市名表示这是个区县；填「河北省」表示这是个地市；留空表示顶层。</div>
         </el-form-item>
         <el-form-item label="层级">
           <el-radio-group v-model="form.level">
@@ -120,9 +141,12 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api } from '../api'
+import { api, downloadTemplate } from '../api'
+import { useUserStore } from '../stores/user'
+
+const store = useUserStore()
 
 const items = ref([])
 const loading = ref(false)
@@ -133,6 +157,10 @@ const checkerVisible = ref(false)
 const checkerInput = ref('')
 const checking = ref(false)
 const checkResult = ref(null)
+const importing = ref(false)
+
+// 地市管理员只能在自己地市下面加区县，上级归属地限制在作用域内
+const parentOptions = computed(() => items.value.filter((item) => item.level !== '区县'))
 
 const form = reactive({
   standard_name: '',
@@ -145,6 +173,24 @@ const form = reactive({
 })
 
 onMounted(load)
+
+async function handleImport(uploadFile) {
+  const file = uploadFile?.raw
+  if (!file) return
+  importing.value = true
+  try {
+    const result = await api.importRegions(file)
+    let message = `导入完成：新增 ${result.created} 条，更新 ${result.updated} 条`
+    if (result.skipped?.length) {
+      message += `；跳过 ${result.skipped.length} 条`
+      ElMessageBox.alert(result.skipped.join('\n'), '这些没导进去', { type: 'warning' })
+    }
+    ElMessage.success(message)
+    load()
+  } finally {
+    importing.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -237,4 +283,3 @@ function matchLabel(value) {
   margin-top: 10px;
 }
 </style>
-

@@ -13,6 +13,7 @@ from ..config import MAX_ROWS_HARD_LIMIT
 from ..models import DataSource, DingTalkBot, PushRule, SendLog, Staff
 from ..security import decrypt
 from . import dingtalk, image_host, image_renderer, image_store, metadata, renderer
+from . import scope as scope_service
 # 注意：run_rule 的形参也叫 trigger，模块必须用别名，否则会被遮蔽
 from . import trigger as trigger_engine
 from .region_norm import RegionNormalizer
@@ -37,6 +38,10 @@ def load_at_config(rule: PushRule) -> dict:
 
 def load_image_config(rule: PushRule) -> dict:
     return _loads(rule.image_json, {})
+
+
+def load_card_config(rule: PushRule) -> dict:
+    return _loads(rule.card_json, {})
 
 
 def _int(value, default: int) -> int:
@@ -83,6 +88,14 @@ def execute_query(
         for key, value in row.items():
             if isinstance(value, datetime):
                 row[key] = value.strftime("%Y-%m-%d %H:%M:%S")
+
+    limit_used = int(built.params.get("_limit") or 0)
+    trigger_mode = str((query_cfg.get("trigger") or {}).get("mode") or "always").lower()
+    if limit_used and len(rows) >= limit_used and trigger_mode != "always":
+        built.warnings.append(
+            f"取数达到扫描上限 {limit_used} 行，后面的数据没取到，判定结果可能不全，"
+            "建议缩小时间范围"
+        )
 
     return keys, rows, built.warnings
 
@@ -201,8 +214,11 @@ def run_rule(
         query_cfg = load_query(rule)
         image_cfg = load_image_config(rule)
 
-        # 归属地：规则自身绑定的归属地优先，否则用当前访客的归属地
-        region_value = rule.region_name or identity_region or ""
+        # 归属地：规则自身绑定的归属地优先，否则用当前访客的归属地。
+        # 挂在地市上的规则要连带下属区县一起取，所以这里展开成作用域。
+        region_value = scope_service.region_filter_value(
+            db, rule.region_name or identity_region or ""
+        )
 
         columns, rows, warnings = execute_query(
             db, ds, query_cfg, rule.region_field, region_value, normalizer
@@ -214,13 +230,13 @@ def run_rule(
         if not rows:
             empty_action = (query_cfg.get("empty_action") or "skip").lower()
             if empty_action == "skip":
-                result.update(success=True, message="无数据，按配置跳过发送")
+                result.update(success=True, sent=False, message="无数据，按配置跳过发送")
                 _write_log(db, rule, trigger, True, 0, 0, "", "无数据，已跳过")
                 return result
 
         # ---- 触发判定：报表类原样通过，告警类只保留命中的行 ----
         trigger_cfg = query_cfg.get("trigger") or {}
-        outcome = trigger_engine.evaluate(rows, trigger_cfg)
+        outcome = trigger_engine.evaluate(rows, trigger_cfg, columns)
         result["warnings"].extend(outcome.warnings)
         result["trigger"] = {
             "mode": trigger_engine.normalize(trigger_cfg)["mode"],
@@ -232,19 +248,35 @@ def run_rule(
 
         if not outcome.hit:
             message = f"未达到触发条件，本次不发送（{outcome.summary}）"
-            result.update(success=True, message=message)
+            result.update(success=True, sent=False, message=message)
             _write_log(db, rule, trigger, True, 0, 0, "", message)
             return result
 
         rows = outcome.rows
+        if outcome.columns:
+            # 分组统计会自己算出一列（比如「出现次数」），列名要跟着一起换
+            columns = outcome.columns
+        # 取数是按扫描上限取全的，真正发出去的行数按「最多发送条数」截
+        send_limit = min(max(int(query_cfg.get("limit") or 50), 1), MAX_ROWS_HARD_LIMIT)
+        if len(rows) > send_limit:
+            result["warnings"].append(
+                f"命中 {len(rows)} 行，按「最多发送条数」只发前 {send_limit} 行"
+            )
+            rows = rows[:send_limit]
         result["rows"] = rows
 
         # ---- 冷却：同一条告警在冷却期内不重复推送 ----
         cooldown = trigger_engine.normalize(trigger_cfg)["cooldown_minutes"]
         remaining = trigger_engine.cooldown_remaining(rule.last_fired_at, cooldown)
-        if remaining > 0:
+        if remaining > 0 and trigger == "manual":
+            # 手动点「立即发送」是明确要发一次，冷却只拦自动推送
+            result["warnings"].append(
+                f"手动运行，已忽略 {cooldown} 分钟冷却（定时推送仍按冷却执行，"
+                f"距上次发送 {cooldown - remaining:.0f} 分钟）"
+            )
+        elif remaining > 0:
             message = f"距上次发送不足 {cooldown} 分钟（还剩约 {remaining:.0f} 分钟），本次跳过"
-            result.update(success=True, message=message)
+            result.update(success=True, sent=False, message=message)
             _write_log(db, rule, trigger, True, 0, 0, "", message)
             return result
 
@@ -254,12 +286,13 @@ def run_rule(
             rows,
             columns,
             highlight=highlight,
+            table_style=renderer.resolve_table_style(rule.msg_type, query_cfg),
         )
         result["rendered"] = rendered
         result["warnings"].extend(render_warnings)
 
         if dry_run:
-            result.update(success=True, message="预览完成（未发送）")
+            result.update(success=True, sent=False, message="预览完成（未发送）")
             return result
 
         at_config = load_at_config(rule)
@@ -281,19 +314,42 @@ def run_rule(
             db, rule, image_cfg, title, rendered, rows, columns, highlight, result
         )
         result["image_url"] = image_url
+
+        excel_url = ""
+        if rule.send_excel and rows:
+            excel_url = build_excel(db, rule, rows, columns, result)
+            if excel_url:
+                body += f"\n\n📎 **数据文件**：[点击下载]({excel_url})"
+
+        card_cfg = load_card_config(rule)
+        # 卡片没配按钮但这次生成了 Excel，就拿下载地址当按钮，省得用户再填一遍
+        if not (card_cfg.get("btn_url") or "") and excel_url:
+            card_cfg["btn_title"] = card_cfg.get("btn_title") or "下载完整数据"
+            card_cfg["btn_url"] = excel_url
+
+        msg_type = (rule.msg_type or "markdown").lower()
         errors: list[str] = []
         ok_count = 0
         for bot in bots:
             webhook = decrypt(bot.webhook_enc)
             secret = decrypt(bot.secret_enc)
-            if rule.msg_type == "text" and not image_url:
-                send_result = dingtalk.send_text(
-                    webhook, secret, body, mobiles, bool(at_config.get("at_all"))
+            at_all = bool(at_config.get("at_all"))
+            if msg_type == "text" and not image_url:
+                send_result = dingtalk.send_text(webhook, secret, body, mobiles, at_all)
+            elif msg_type == "actioncard":
+                send_result = dingtalk.send_action_card(
+                    webhook,
+                    secret,
+                    card_cfg.get("title") or title,
+                    body,
+                    mobiles,
+                    at_all,
+                    btn_title=card_cfg.get("btn_title") or "",
+                    btn_url=card_cfg.get("btn_url") or "",
+                    btn_orientation=str(card_cfg.get("btn_orientation") or "0"),
                 )
             else:
-                send_result = dingtalk.send_markdown(
-                    webhook, secret, title, body, mobiles, bool(at_config.get("at_all"))
-                )
+                send_result = dingtalk.send_markdown(webhook, secret, title, body, mobiles, at_all)
             if send_result.ok:
                 ok_count += 1
             else:
@@ -416,6 +472,68 @@ def build_body(
     if text_part.strip():
         return f"{text_part}\n\n{image_line}", image_url
     return f"#### {caption}\n\n{image_line}", image_url
+
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def build_excel(
+    db: Session,
+    rule: PushRule,
+    rows: list[dict],
+    columns: list[str],
+    result: dict,
+) -> str:
+    """把本次数据导出成 Excel，返回可下载地址；生成不出来就返回空串。
+
+    图床模式优先传图床（钉钉手机端才拉得到），图床不收 xlsx 就退回本系统地址，
+    两种情况都往 warnings 里写清楚，免得运营人员以为附件发出去了。
+    """
+    import pandas as pd  # 只有开了 Excel 的规则才需要它
+    from io import BytesIO
+
+    try:
+        buffer = BytesIO()
+        pd.DataFrame(rows, columns=columns).to_excel(buffer, index=False, engine="openpyxl")
+        content = buffer.getvalue()
+    except Exception as exc:  # noqa: BLE001 - 导出失败不该让整条推送失败
+        result["warnings"].append(f"生成 Excel 文件失败：{exc}")
+        return ""
+
+    safe_name = "".join(ch for ch in (rule.name or "report") if ch not in '\\/:*?"<>|').strip()
+    filename = f"{safe_name or 'report'}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+
+    if image_store.upload_mode(db) == image_store.MODE_BEEIMG:
+        try:
+            url = image_host.upload_file(
+                content,
+                filename=filename,
+                content_type=XLSX_MIME,
+                **image_store.beeimg_config(db, intro=f"{rule.name} 数据文件"),
+            )
+        except image_host.UploadError as exc:
+            result["warnings"].append(f"Excel 上传图床失败，改用本系统地址：{exc}")
+        else:
+            result["warnings"].append("已生成 Excel 数据文件（已上传图床）")
+            return url
+
+    base = image_store.base_url(db)
+    if not base:
+        result["warnings"].append(
+            "还没配置「图片服务地址」，Excel 下载链接发不出去，本次只发文字（可在「系统设置」里补上）"
+        )
+        return ""
+    if image_store.is_local_url(base):
+        result["warnings"].append(
+            f"文件地址是 {base}，钉钉手机端可能下载不了，建议改成局域网地址或改用图床"
+        )
+    name = image_store.save(content, rule.id, suffix=".xlsx")
+    try:
+        image_store.cleanup(image_store.retention_days(db))
+    except OSError:
+        pass
+    result["warnings"].append("已生成 Excel 数据文件")
+    return image_store.url_for(base, name)
 
 
 def _write_log(

@@ -13,12 +13,35 @@
     <div class="panel">
       <div class="panel-body tight">
         <el-table :data="rules" v-loading="loading" style="width: 100%">
+          <template #empty>
+            <div class="empty-hint">
+              <template v-if="store.isAdmin">还没有推送规则，点右上角「新建规则」开始配置。</template>
+              <template v-else-if="store.isCityAdmin">
+                还没看到规则。你只能看到本地市（{{ store.user?.region_name || '—' }}）的规则，
+                归属地为「全部归属地」的规则由省级管理员维护。
+              </template>
+              <template v-else>
+                还没看到规则。你只能看到自己归属地（{{ store.user?.region_name || '—' }}）的规则。
+              </template>
+              <div v-if="store.canManageRules" class="empty-action">
+                <el-link type="primary" @click="router.push({ name: 'rule-new' })">立即创建</el-link>
+              </div>
+            </div>
+          </template>
           <el-table-column prop="name" label="规则名称" min-width="200" show-overflow-tooltip>
             <template #default="{ row }">
               <div class="rule-name">
                 {{ row.name }}
                 <el-tag v-if="row.image && row.image.enabled" size="small" type="warning" effect="plain">
                   图片
+                </el-tag>
+                <el-tag
+                  v-else-if="(row.msg_type || '').toLowerCase() === 'actioncard'"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                >
+                  卡片
                 </el-tag>
               </div>
               <div class="rule-sub">{{ row.table_name }}</div>
@@ -69,11 +92,6 @@
               <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
-          <template #empty>
-            <div class="empty">
-              还没有推送规则。<el-link type="primary" @click="router.push({ name: 'rule-new' })">立即创建</el-link>
-            </div>
-          </template>
         </el-table>
       </div>
     </div>
@@ -81,12 +99,16 @@
     <el-dialog v-model="resultVisible" title="发送结果" width="680px">
       <div v-if="runResult">
         <el-alert
-          :type="runResult.success ? 'success' : 'error'"
-          :title="runResult.message || (runResult.success ? '执行成功' : '执行失败')"
+          :type="alertType"
+          :title="alertTitle"
           :description="runResult.error || ''"
           :closable="false"
           show-icon
         />
+        <div v-if="runResult.trigger && runResult.trigger.summary" class="result-block">
+          <div class="result-title">触发判定</div>
+          <div class="warn-line">{{ runResult.trigger.summary }}</div>
+        </div>
         <div v-if="runResult.warnings && runResult.warnings.length" class="result-block">
           <div class="result-title">过程提示</div>
           <div v-for="(msg, i) in runResult.warnings" :key="i" class="warn-line">· {{ msg }}</div>
@@ -104,7 +126,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api'
@@ -120,6 +142,23 @@ const running = ref(null)
 const resultVisible = ref(false)
 const runResult = ref(null)
 
+// 「执行成功」不代表「发出去了」：没命中、在冷却期、没数据都会跳过，
+// 用黄色提示区分开，别让人以为消息已经发了。
+const alertType = computed(() => {
+  const result = runResult.value
+  if (!result) return 'info'
+  if (!result.success) return 'error'
+  return result.sent ? 'success' : 'warning'
+})
+
+const alertTitle = computed(() => {
+  const result = runResult.value
+  if (!result) return ''
+  if (!result.success) return result.message || '执行失败'
+  if (!result.sent) return result.message || '本次没有发送'
+  return result.message || '已发送'
+})
+
 const WEEK = { mon: '周一', tue: '周二', wed: '周三', thu: '周四', fri: '周五', sat: '周六', sun: '周日' }
 
 onMounted(load)
@@ -129,7 +168,7 @@ async function load() {
   try {
     const [ruleList, botList] = await Promise.all([
       api.listRules(store.user?.mobile),
-      api.listBots(),
+      api.listBots(store.user?.mobile),
     ])
     rules.value = ruleList
     bots.value = botList
@@ -226,6 +265,20 @@ async function remove(row) {
   font-size: 12px;
   color: #b54708;
   line-height: 1.8;
+}
+
+.empty-hint {
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 18px 0;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.9;
+  color: var(--ink-500);
+}
+
+.empty-action {
+  margin-top: 6px;
 }
 </style>
 

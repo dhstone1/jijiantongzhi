@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
+from ..config import DATA_DIR
 from ..models import DataSource
 from ..security import decrypt
 
@@ -21,9 +23,37 @@ DEFAULT_LIMIT = 20
 MAX_LIMIT = 500
 
 
+def _sqlite_url(file_path: str) -> str:
+    """SQLite 数据源一律只读打开，并且不许指向系统库或应用数据目录。
+
+    原来 file_path 是调用者随便填的字符串，直接拼成 sqlite:///...，
+    既可以用它读走 backend/data/system.db（里面是人员名册和加密后的凭据），
+    也能让 SQLite 顺手创建一个不存在的文件。这里把口子收掉：
+      * 只接受 .db/.sqlite/.sqlite3 后缀
+      * 必须落在数据目录之外，且不能是系统库
+      * 用 URI 方式加 mode=ro，从驱动层保证只读
+    """
+    raw = (file_path or "").strip()
+    if not raw:
+        raise ValueError("请填写 SQLite 文件路径")
+    candidate = Path(raw)
+    if candidate.suffix.lower() not in (".db", ".sqlite", ".sqlite3"):
+        raise ValueError("SQLite 只支持 .db / .sqlite / .sqlite3 文件")
+    resolved = candidate.expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError(f"找不到文件：{resolved}")
+    # 只挡系统自身的库和密钥，数据目录里的业务库（比如演示库）是正常数据源
+    protected = {"system.db", "secret.key"}
+    if resolved.name.lower() in protected:
+        raise ValueError("不能把数据源指向系统自身的库文件")
+    if (DATA_DIR / "images").resolve() in resolved.parents:
+        raise ValueError("不能把图片目录当成数据源")
+    return f"sqlite:///file:{resolved.as_posix()}?mode=ro&uri=true"
+
+
 def build_url(ds: DataSource) -> str:
     if ds.db_type == "sqlite":
-        return f"sqlite:///{ds.file_path}"
+        return _sqlite_url(ds.file_path)
     password = decrypt(ds.password_enc)
     return (
         f"postgresql+psycopg://{ds.username}:{password}"
@@ -148,4 +178,3 @@ def load_snapshot(ds: DataSource) -> dict[str, Any]:
         return json.loads(ds.meta_json or "{}")
     except json.JSONDecodeError:
         return {}
-

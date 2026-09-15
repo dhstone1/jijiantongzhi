@@ -43,6 +43,8 @@ class StaffIn(BaseModel):
 
 class BotIn(BaseModel):
     name: str
+    # 这个群归哪个地市管；省级管理员留空表示全省共用
+    region_name: str = ""
     webhook: str = ""
     secret: str = ""
     is_active: bool = True
@@ -62,10 +64,13 @@ class RuleIn(BaseModel):
     at_config: dict[str, Any] = Field(default_factory=dict)
     # 图片推送：{enabled, title, subtitle, max_rows, with_text, footer}
     image: dict[str, Any] = Field(default_factory=dict)
+    # ActionCard 卡片：{title, btn_title, btn_url, btn_orientation}
+    card: dict[str, Any] = Field(default_factory=dict)
     schedule_type: str = "manual"
     schedule: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     sample: dict[str, Any] = Field(default_factory=dict)
+    send_excel: bool = False
 
 
 class PreviewIn(BaseModel):
@@ -74,8 +79,11 @@ class PreviewIn(BaseModel):
     region_field: str = ""
     region_name: str = ""
     template: str = ""
+    # 纯文本消息不做 markdown 渲染，表格样式要跟着一起降级
+    msg_type: str = "markdown"
     limit: int = 50
     image: dict[str, Any] = Field(default_factory=dict)
+    send_excel: bool = False
 
 
 class SettingsIn(BaseModel):
@@ -88,3 +96,9 @@ class SettingsIn(BaseModel):
     beeimg_expire_days: int | None = None
     beeimg_is_public: bool | None = None
     beeimg_remove_exif: bool | None = None
+
+
+class PermissionGrantIn(BaseModel):
+    resource_type: str
+    resource_id: int
+    mobiles: list[str] = Field(default_factory=list)

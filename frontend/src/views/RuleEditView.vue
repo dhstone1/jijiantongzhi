@@ -49,26 +49,33 @@
             </div>
             <div class="field">
               <label>归属地</label>
-              <el-select v-model="form.region_name" placeholder="全部归属地" clearable filterable>
-                <el-option label="全部归属地（不按归属地过滤）" value="" />
+              <el-select v-model="form.region_name" placeholder="请选择归属地" clearable filterable>
+                <el-option v-if="store.isAdmin" label="全部归属地（不按归属地过滤）" value="" />
                 <el-option v-for="r in regions" :key="r.id" :label="r.standard_name" :value="r.standard_name" />
               </el-select>
-              <div class="hint">非管理员只能看到自己归属地的规则。</div>
+              <div class="hint">{{ regionHint }}</div>
+            </div>
+            <div class="field">
+              <label>推送形式</label>
+              <el-radio-group v-model="pushStyle">
+                <el-radio-button value="table">数据表格</el-radio-button>
+                <el-radio-button value="image">报表图片</el-radio-button>
+              </el-radio-group>
+              <div class="hint">{{ pushStyleHint }}</div>
             </div>
             <div class="field">
               <label>发送方式</label>
-              <el-radio-group v-model="form.msg_type" :disabled="form.image.enabled">
+              <el-radio-group v-model="form.msg_type">
                 <el-radio-button value="markdown">Markdown</el-radio-button>
-                <el-radio-button value="text">纯文本</el-radio-button>
+                <el-radio-button value="actionCard">ActionCard</el-radio-button>
+                <el-radio-button value="text" :disabled="pushStyle === 'image'">纯文本</el-radio-button>
               </el-radio-group>
-              <div v-if="form.image.enabled" class="hint">
-                图片只能走 Markdown（钉钉限制），已经自动锁定。
-              </div>
+              <div class="hint">{{ msgTypeHint }}</div>
             </div>
             <div class="field">
-              <label>图片发送</label>
-              <el-switch v-model="form.image.enabled" active-text="以图片形式发送报表" />
-              <div class="hint">把结果画成一张图发到群里，手机上不用左右滑动。</div>
+              <label>发送Excel</label>
+              <el-switch v-model="form.send_excel" active-text="同时发送 Excel 数据文件" />
+              <div class="hint">生成 .xlsx 文件并在消息中附上下载链接。</div>
             </div>
             <div class="field">
               <label>状态</label>
@@ -143,8 +150,18 @@
                     :key="name"
                     closable
                     class="chip"
+                    :class="{
+                      'chip-dragging': dragIndex === index,
+                      'chip-drop-target': dragOverIndex === index && dragIndex !== index,
+                    }"
+                    draggable="true"
+                    @dragstart="onChipDragStart(index, $event)"
+                    @dragover.prevent="onChipDragOver(index)"
+                    @drop.prevent="onChipDrop(index)"
+                    @dragend="clearDragState"
                     @close="removeField(name)"
                   >
+                    <el-icon class="chip-handle"><Rank /></el-icon>
                     <span class="chip-index">{{ index + 1 }}</span>{{ name }}
                     <el-icon class="chip-move" @click.stop="moveField(index, -1)"><Top /></el-icon>
                     <el-icon class="chip-move" @click.stop="moveField(index, 1)"><Bottom /></el-icon>
@@ -162,7 +179,7 @@
                   {{
                     form.query.group_by.length
                       ? '已开启分组汇总，这里显示的即分组字段，顺序即消息里的显示顺序。'
-                      : '点标签上的上下箭头可调整列顺序，顺序即消息里的显示顺序。'
+                      : '直接拖动标签调整列顺序（也可以用标签上的上下箭头），顺序即消息里的显示顺序。'
                   }}
                 </div>
               </template>
@@ -225,7 +242,8 @@
 
               <div class="hint">
                 分组字段选「区县」，汇总项选「计数 / 基站名称」，就能得到各区县故障条数；
-                汇总项留空则按明细逐条发送。
+                汇总项留空则按明细逐条发送。汇总算出来的字段（如「告警次数」）可以直接用在
+                下方的「筛选条件」和「排序」里，系统会自动把它放到分组之后筛选（HAVING）。
               </div>
             </div>
 
@@ -233,7 +251,12 @@
               <div class="block-title">筛选条件</div>
               <div v-for="(f, i) in form.query.filters" :key="i" class="cond-row">
                 <el-select v-model="f.column" placeholder="字段" filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="f.op" class="cond-op">
                   <el-option v-for="op in operators" :key="op.value" :label="op.label" :value="op.value" />
@@ -257,6 +280,10 @@
               <el-button size="small" text type="primary" @click="addFilter">
                 <el-icon><Plus /></el-icon> 添加条件
               </el-button>
+              <div v-if="aggColumns.length" class="hint">
+                「分组汇总字段」（如告警次数）是分组算完之后才有的，选它会生成 SQL 的 HAVING，
+                也就是先分组统计、再筛掉不达标的组；表字段仍然是取数前就过滤。
+              </div>
             </div>
 
             <div class="block">
@@ -284,7 +311,12 @@
               <div class="block-title">排序与条数</div>
               <div v-for="(o, i) in form.query.order_by" :key="i" class="cond-row">
                 <el-select v-model="o.column" placeholder="排序字段" filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="o.direction" class="cond-op">
                   <el-option label="降序" value="desc" />
@@ -299,7 +331,13 @@
                   <el-icon><Plus /></el-icon> 添加排序
                 </el-button>
                 <span class="muted split">最多发送条数</span>
-                <el-input-number v-model="form.query.limit" :min="1" :max="200" class="cond-num" />
+                <el-input-number v-model="form.query.limit" :min="1" :max="2000" class="cond-num" />
+                <span class="muted">行，限制的是发出去的行数</span>
+              </div>
+              <div class="hint">
+                触发判定（阈值条件 / 同一字段累计达到标准）是在取到的全量数据上算的，
+                不受这里影响。分组统计尤其需要全量：只取几十行的话，
+                「同一个基站出现 3 次」这种结论就会被截断。
               </div>
             </div>
 
@@ -312,7 +350,85 @@
               <el-radio-group v-model="form.query.trigger.mode">
                 <el-radio-button value="always">有数据就发送（报表）</el-radio-button>
                 <el-radio-button value="threshold">满足条件才发送（告警）</el-radio-button>
+                <el-radio-button value="group">同一字段累计达到标准</el-radio-button>
               </el-radio-group>
+
+              <template v-if="form.query.trigger.mode === 'group'">
+                <div class="cond-row trigger-row">
+                  <span class="muted">统计字段</span>
+                  <el-select
+                    v-model="form.query.trigger.group_field"
+                    placeholder="例如：小区名称"
+                    filterable
+                    class="cond-field"
+                  >
+                    <el-option v-for="name in outputColumns" :key="name" :label="name" :value="name" />
+                  </el-select>
+                  <el-select v-model="form.query.trigger.func" class="cond-op">
+                    <el-option v-for="f in groupFuncs" :key="f.value" :label="f.label" :value="f.value" />
+                  </el-select>
+                  <el-select
+                    v-if="form.query.trigger.func !== 'count'"
+                    v-model="form.query.trigger.value_field"
+                    placeholder="数值字段"
+                    filterable
+                    class="cond-field"
+                  >
+                    <el-option v-for="name in outputColumns" :key="name" :label="name" :value="name" />
+                  </el-select>
+                </div>
+
+                <div class="cond-row trigger-row">
+                  <span class="muted">发送标准</span>
+                  <el-select v-model="form.query.trigger.op" class="cond-op">
+                    <el-option v-for="op in groupOps" :key="op.value" :label="op.label" :value="op.value" />
+                  </el-select>
+                  <el-input v-model="form.query.trigger.value" class="cond-value" placeholder="标准值" />
+                  <span class="muted">，达到标准的才发出去</span>
+                </div>
+
+                <div class="inline-row trigger-row">
+                  <span class="muted">发送内容</span>
+                  <el-radio-group v-model="form.query.trigger.detail" size="small">
+                    <el-radio-button value="summary">每个值汇总一行</el-radio-button>
+                    <el-radio-button value="rows">命中值的原始明细</el-radio-button>
+                  </el-radio-group>
+                </div>
+
+                <div
+                  v-if="form.query.trigger.detail === 'summary'"
+                  class="cond-row trigger-row"
+                >
+                  <span class="muted">附带字段</span>
+                  <el-select
+                    v-model="form.query.trigger.extra_field"
+                    placeholder="可选，例如：区县"
+                    clearable
+                    filterable
+                    class="cond-field"
+                  >
+                    <el-option v-for="name in outputColumns" :key="name" :label="name" :value="name" />
+                  </el-select>
+                  <span class="muted">汇总行里带上归属地，@人 和分派工单都要用</span>
+                </div>
+
+                <div class="inline-row trigger-row">
+                  <span class="muted">冷却时间</span>
+                  <el-input-number
+                    v-model="form.query.trigger.cooldown_minutes"
+                    :min="0"
+                    :max="1440"
+                    class="cond-num"
+                  />
+                  <span class="muted">分钟，防止同一条告警反复刷屏（0 = 不冷却）</span>
+                </div>
+
+                <div class="hint">
+                  直接在取数结果上按字段归堆算一次。比如统计字段选「小区名称」、方式选「出现次数」、
+                  标准填「≥ 3」，那么最近一段时间出现 3 次以上的小区才会被发出来 ——
+                  不用再自己去配「分组汇总 + 计数 + 阈值」。汇总模式下记得选个附带字段（比如区县），@人 时才用得上。
+                </div>
+              </template>
 
               <template v-if="form.query.trigger.mode === 'threshold'">
                 <div class="inline-row trigger-row">
@@ -363,7 +479,12 @@
               <div class="block-title">异常高亮</div>
               <div class="inline-row">
                 <el-select v-model="form.query.highlight.field" placeholder="不启用高亮" clearable filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="form.query.highlight.op" class="cond-op" :disabled="!form.query.highlight.field">
                   <el-option label="大于" value=">" />
@@ -389,6 +510,41 @@
             </div>
           </div>
         </section>
+        <section v-if="isActionCard" class="panel">
+          <div class="panel-head">
+            <div class="panel-title">卡片设置</div>
+            <span class="muted">ActionCard 把消息装进一张带标题栏的卡片</span>
+          </div>
+          <div class="panel-body form-grid">
+            <div class="field">
+              <label>卡片标题</label>
+              <el-input v-model="form.card.title" :placeholder="form.name || '默认用规则名称'" />
+            </div>
+            <div class="field">
+              <label>按钮文字</label>
+              <el-input v-model="form.card.btn_title" placeholder="留空就没有按钮，例如：查看完整报表" />
+            </div>
+            <div class="field">
+              <label>按钮链接</label>
+              <el-input
+                v-model="form.card.btn_url"
+                placeholder="https://…；留空且开了「发送Excel」时自动用下载地址"
+              />
+            </div>
+            <div class="field">
+              <label>按钮排列</label>
+              <el-radio-group v-model="form.card.btn_orientation">
+                <el-radio-button value="0">竖排</el-radio-button>
+                <el-radio-button value="1">横排</el-radio-button>
+              </el-radio-group>
+            </div>
+            <div class="field span-2 hint">
+              钉钉的 ActionCard 正文和 Markdown 消息共用同一套渲染，表格能不能显示成表格仍然看客户端；
+              卡片的好处是标题栏更醒目、还能挂一个跳转按钮。按钮文字和链接要一起填，只填一半等于没有按钮。
+            </div>
+          </div>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <div class="panel-title">消息内容</div>
@@ -410,7 +566,7 @@
             <div class="hint">
               可用占位符：{{ help.field }} 取第一行的值、{{ help.table }} 渲染全部数据、
               {{ help.list }} 每行一条、{{ help.count }} 行数、{{ help.date }}、{{ help.time }}。
-              钉钉 markdown 不支持表格，所以 {{ help.table }} 输出的是按列对齐的文本，在钉钉里显示依然整齐。
+              {{ help.table }} 输出的是 Markdown 表格；选了「报表图片」时，数据表只出现在图片里。
             </div>
           </div>
         </section>
@@ -496,7 +652,12 @@
                 <div class="inline-row">
                   <span class="muted">按</span>
                   <el-select v-model="form.at_config.field" placeholder="归属地字段" filterable class="cond-field">
-                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    <el-option-group label="表字段">
+                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    </el-option-group>
+                    <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                      <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                    </el-option-group>
                   </el-select>
                   <span class="muted">的取值，@ 对应归属地的负责人</span>
                 </div>
@@ -506,7 +667,12 @@
                 <div class="inline-row">
                   <span class="muted">按</span>
                   <el-select v-model="form.at_config.field" placeholder="人员姓名字段" filterable class="cond-field">
-                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    <el-option-group label="表字段">
+                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    </el-option-group>
+                    <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                      <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                    </el-option-group>
                   </el-select>
                   <span class="muted">的取值匹配人员姓名后 @ 他</span>
                 </div>
@@ -518,7 +684,12 @@
                   <el-checkbox v-model="conditionEnabled">仅在满足条件时 @</el-checkbox>
                   <template v-if="conditionEnabled">
                     <el-select v-model="form.at_config.condition.field" placeholder="字段" filterable class="cond-field">
-                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                      <el-option-group label="表字段">
+                        <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                      </el-option-group>
+                      <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                        <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                      </el-option-group>
                     </el-select>
                     <el-select v-model="form.at_config.condition.op" class="cond-op">
                       <el-option label="大于" value=">" />
@@ -576,9 +747,7 @@
           <div class="preview-head">
             <span>数据预览</span>
             <span class="muted">
-              <template v-if="preview.trigger && preview.trigger.mode === 'threshold'">
-                命中 {{ preview.trigger.hit_count }} / {{ preview.trigger.total }} 行
-              </template>
+              <template v-if="hasTrigger">{{ hitLabel }}</template>
               <template v-else>{{ preview.row_count ?? '—' }} 行</template>
             </span>
           </div>
@@ -586,11 +755,11 @@
             <div v-if="previewError" class="preview-error">{{ previewError }}</div>
             <template v-else-if="preview.columns && preview.columns.length">
               <div
-                v-if="preview.trigger && preview.trigger.mode === 'threshold'"
+                v-if="hasTrigger"
                 class="trigger-banner"
                 :class="preview.trigger.hit ? 'ok' : 'bad'"
               >
-                {{ preview.trigger.hit ? '本次将发送命中的行：' : '当前无命中，本次不会发送：' }}
+                {{ hitBanner }}
                 {{ preview.trigger.summary }}
               </div>
               <el-table
@@ -636,6 +805,9 @@
         <div class="preview-card">
           <div class="preview-head"><span>钉钉消息效果</span></div>
           <div class="preview-body">
+            <div v-if="isActionCard" class="hint" style="margin-bottom: 8px">
+              {{ cardPreviewText }}
+            </div>
             <pre v-if="preview.rendered" class="message-preview">{{ preview.rendered }}</pre>
             <div v-else class="empty">填写模板后刷新预览</div>
           </div>
@@ -802,6 +974,35 @@ const triggerOps = [
   { label: '包含', value: 'contains' },
 ]
 
+// 分组统计是数值比较，不提供「包含」
+const groupOps = triggerOps.filter((op) => op.value !== 'contains')
+
+// 分组统计的算法
+const groupFuncs = [
+  { label: '出现次数', value: 'count' },
+  { label: '去重数', value: 'count_distinct' },
+  { label: '合计', value: 'sum' },
+  { label: '平均', value: 'avg' },
+  { label: '最大值', value: 'max' },
+  { label: '最小值', value: 'min' },
+]
+
+function emptyTrigger() {
+  return {
+    mode: 'always',
+    logic: 'or',
+    conditions: [],
+    group_field: '',
+    func: 'count',
+    value_field: '',
+    extra_field: '',
+    op: '>=',
+    value: 3,
+    detail: 'summary',
+    cooldown_minutes: 0,
+  }
+}
+
 // 场景模板：把常见诉求预置好，用户选完再微调
 const scenarios = [
   {
@@ -817,13 +1018,17 @@ const scenarios = [
   {
     key: 'count',
     icon: '🔔',
-    title: '次数触发',
-    desc: '同一个对象在一段时间内发生 N 次才提醒，例如同一个小区退服 ≥ 3 次。',
-    hint: '下一步：分组字段选对象（小区 / 基站）→ 加一个「计数」统计项 → 在「触发条件」里把指标指向它、阈值填成你要的次数。',
+    title: '重复次数触发',
+    desc: '某个字段的同一个值在一段时间内出现 N 次才提醒，例如同一个小区退服 ≥ 3 次。',
+    hint: '下一步：先把「时间范围」设成最近 N 小时 → 在「触发条件」里选统计字段（如小区名称），方式保持「出现次数」，标准填你要的次数。',
     trigger: {
-      mode: 'threshold',
-      logic: 'or',
-      conditions: [{ field: '', op: '>=', value: 3 }],
+      mode: 'group',
+      group_field: '',
+      func: 'count',
+      extra_field: '',
+      op: '>=',
+      value: 3,
+      detail: 'summary',
       cooldown_minutes: 120,
     },
     schedule_type: 'hourly',
@@ -924,7 +1129,7 @@ function emptyQuery() {
     limit: 50,
     empty_action: 'skip',
     highlight: { field: '', op: '>', value: 0 },
-    trigger: { mode: 'always', logic: 'or', conditions: [], cooldown_minutes: 0 },
+    trigger: emptyTrigger(),
   }
 }
 
@@ -939,6 +1144,7 @@ const form = reactive({
   template: '',
   msg_type: 'markdown',
   image: { enabled: false, title: '', subtitle: '', max_rows: 30, with_text: true },
+  card: { title: '', btn_title: '', btn_url: '', btn_orientation: '0' },
   bot_ids: [],
   at_config: {
     mode: 'none',
@@ -965,6 +1171,51 @@ const dailyTime = computed({
     form.schedule.hour = Number(parts[0])
     form.schedule.minute = Number(parts[1])
   },
+})
+
+// 「推送形式」是界面上的说法，存到规则里就是 image.enabled
+const pushStyle = computed({
+  get: () => (form.image.enabled ? 'image' : 'table'),
+  set(value) {
+    form.image.enabled = value === 'image'
+    // 纯文本消息塞不下图片，切到图片时把纯文本兜掉
+    if (form.image.enabled && form.msg_type === 'text') form.msg_type = 'markdown'
+  },
+})
+
+const pushStyleHint = computed(() =>
+  pushStyle.value === 'image'
+    ? '把结果画成一张 PNG 发到群里，手机上不用左右滑动。'
+    : '把数据当成表格发到群里，一条消息里带完整的行列。',
+)
+
+const regionHint = computed(() => {
+  if (store.isAdmin) return '留空表示不按归属地过滤，全省数据都取；选了归属地就只取那一片。'
+  if (store.isCityAdmin) {
+    return `只能挂到本地市的归属地（当前：${store.user?.region_name || '—'}）。挂地市会把下属区县一起取。`
+  }
+  return '普通人员只能看本地市的规则。'
+})
+
+const isActionCard = computed(() => form.msg_type === 'actionCard')
+
+const cardPreviewText = computed(() => {
+  const title = form.card.title || form.name || '规则名称'
+  const hasButton = Boolean(form.card.btn_title && form.card.btn_url)
+  const button = hasButton
+    ? `按钮「${form.card.btn_title}」→ ${form.card.btn_url}`
+    : '没有按钮'
+  return `ActionCard 卡片标题：${title} · ${button}`
+})
+
+const msgTypeHint = computed(() => {
+  if (form.msg_type === 'text') return '纯文本消息不解析 Markdown，表格会自动换成纯文本对齐。'
+  if (form.msg_type === 'actionCard') {
+    return pushStyle.value === 'image'
+      ? '图片放进卡片里发，卡片上还能挂一个按钮。'
+      : '消息装进带标题栏的卡片，正文同样是 Markdown，还能挂一个按钮。'
+  }
+  return pushStyle.value === 'image' ? '图片以 Markdown 图片链接的形式发送。' : '普通的 Markdown 消息。'
 })
 
 const availableColumns = computed(() =>
@@ -994,10 +1245,34 @@ const outputColumns = computed(() => {
   return names
 })
 
+// 分组汇总算出来的字段。筛选条件里选它们会走到 HAVING，而不是 WHERE
+const aggColumns = computed(() =>
+  outputColumns.value.filter((name) => !form.query.select.includes(name)),
+)
+
 const hitIndexSet = computed(() => new Set(preview.hit_indexes || []))
 
+// 触发条件开了（阈值 / 分组统计）才需要展示命中情况
+const hasTrigger = computed(() => Boolean(preview.trigger) && preview.trigger.mode !== 'always')
+
+const hitLabel = computed(() => {
+  const trigger = preview.trigger
+  if (!trigger) return ''
+  if (trigger.mode === 'group') return `命中 ${trigger.hit_count} 个 / 共 ${trigger.total} 行`
+  return `命中 ${trigger.hit_count} / ${trigger.total} 行`
+})
+
+const hitBanner = computed(() => {
+  const trigger = preview.trigger
+  if (!trigger) return ''
+  if (trigger.mode === 'group') {
+    return trigger.hit ? '本次将发送达到标准的对象：' : '当前没有对象达到标准，本次不会发送：'
+  }
+  return trigger.hit ? '本次将发送命中的行：' : '当前无命中，本次不会发送：'
+})
+
 function previewRowClass({ rowIndex }) {
-  if (!preview.trigger || preview.trigger.mode !== 'threshold') return ''
+  if (!hasTrigger.value) return ''
   return hitIndexSet.value.has(rowIndex) ? 'row-hit' : 'row-miss'
 }
 
@@ -1042,10 +1317,9 @@ function applyScenario(item) {
   activeScenario.value = item.key
   scenarioHint.value = item.hint
   form.query.trigger = {
-    mode: item.trigger.mode,
-    logic: item.trigger.logic,
-    conditions: item.trigger.conditions.map((c) => ({ ...c })),
-    cooldown_minutes: item.trigger.cooldown_minutes,
+    ...emptyTrigger(),
+    ...item.trigger,
+    conditions: (item.trigger.conditions || []).map((c) => ({ ...c })),
   }
   form.schedule_type = item.schedule_type
   if (item.template && !form.template) form.template = item.template
@@ -1053,9 +1327,9 @@ function applyScenario(item) {
 
 onMounted(async () => {
   const [ds, rg, bt, st, settings] = await Promise.all([
-    api.listDatasources(),
+    api.listDatasources(store.user?.mobile),
     api.listRegions(),
-    api.listBots(),
+    api.listBots(store.user?.mobile),
     api.listStaff(),
     api.getSettings().catch(() => ({})),
   ])
@@ -1088,10 +1362,7 @@ async function loadRule(id) {
   form.query.table = rule.table_name
   if (!form.query.highlight) form.query.highlight = { field: '', op: '>', value: 0 }
   form.query.trigger = {
-    mode: 'always',
-    logic: 'or',
-    conditions: [],
-    cooldown_minutes: 0,
+    ...emptyTrigger(),
     ...(form.query.trigger || {}),
   }
   if (!Array.isArray(form.query.trigger.conditions)) form.query.trigger.conditions = []
@@ -1106,6 +1377,13 @@ async function loadRule(id) {
     max_rows: 30,
     with_text: true,
     ...(rule.image || {}),
+  }
+  form.card = {
+    title: '',
+    btn_title: '',
+    btn_url: '',
+    btn_orientation: '0',
+    ...(rule.card || {}),
   }
   form.bot_ids = rule.bot_ids || []
   form.at_config = {
@@ -1171,16 +1449,50 @@ function removeField(name) {
 
 function moveField(index, offset) {
   const target = index + offset
+  reorderFields(index, target)
+}
+
+// 把 from 位置的字段挪到 to 位置；开了分组汇总时 group_by 跟着 select 的顺序走
+function reorderFields(from, to) {
   const list = form.query.select
-  if (target < 0 || target >= list.length) return
-  const tmp = list[index]
-  list[index] = list[target]
-  list[target] = tmp
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return
+  const [moved] = list.splice(from, 1)
+  list.splice(to, 0, moved)
   if (form.query.group_by.length) {
     const grouped = new Set(form.query.group_by)
     form.query.group_by = list.filter((name) => grouped.has(name))
   }
 }
+
+// 拖动排序用浏览器原生拖放，不额外引第三方库
+const dragIndex = ref(-1)
+const dragOverIndex = ref(-1)
+
+function clearDragState() {
+  dragIndex.value = -1
+  dragOverIndex.value = -1
+}
+
+function onChipDragStart(index, event) {
+  dragIndex.value = index
+  dragOverIndex.value = index
+  if (event && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox 不往 dataTransfer 里塞点东西就不会触发 drop
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onChipDragOver(index) {
+  dragOverIndex.value = index
+}
+
+function onChipDrop(index) {
+  const from = dragIndex.value
+  clearDragState()
+  if (from >= 0) reorderFields(from, index)
+}
+
 
 function addFilter() {
   form.query.filters.push({ column: '', op: '=', value: '', logic: 'and' })
@@ -1215,7 +1527,8 @@ function insertToken(token) {
 watch(
   () => form.image.enabled,
   (value) => {
-    if (value) form.msg_type = 'markdown'
+    // 纯文本消息塞不下图片，开了图片就不能停在纯文本上；ActionCard 允许带图
+    if (value && form.msg_type === 'text') form.msg_type = 'markdown'
   },
   { immediate: true },
 )
@@ -1249,7 +1562,9 @@ async function runPreview() {
       region_field: form.region_field,
       region_name: form.region_name,
       template: form.template,
-      limit: Math.min(form.query.limit || 50, 100),
+      msg_type: form.msg_type,
+      // 分组统计要在整批数据上算次数，取太少会让「出现 N 次」失真
+      limit: Math.min(form.query.limit || 50, 500),
       image: { ...form.image, max_rows: Number(form.image.max_rows) || 30 },
     })
     preview.columns = result.columns
@@ -1276,10 +1591,8 @@ async function runPreview() {
 let previewTimer = null
 watch(
   () => [
-    JSON.stringify(form.query.select),
-    JSON.stringify(form.query.group_by),
-    JSON.stringify(form.query.aggregations),
-    JSON.stringify(form.query.trigger),
+    // 整块 query 一起盯：以前漏了筛选条件 / 时间范围 / 排序，改了这些预览不会刷新
+    JSON.stringify(form.query),
     JSON.stringify(form.image),
     form.region_field,
     form.region_name,
@@ -1333,6 +1646,7 @@ async function save() {
     template: form.template,
     msg_type: form.msg_type,
     image: { ...form.image, max_rows: Number(form.image.max_rows) || 30 },
+    card: { ...form.card },
     bot_ids: form.bot_ids,
     at_config: atConfig,
     schedule_type: form.schedule_type,
@@ -1447,6 +1761,27 @@ async function save() {
 .chip {
   height: 28px;
   padding: 0 6px 0 4px;
+  cursor: grab;
+}
+
+.chip:active {
+  cursor: grabbing;
+}
+
+.chip-dragging {
+  opacity: 0.4;
+}
+
+.chip-drop-target {
+  outline: 2px solid var(--brand-600);
+  outline-offset: 1px;
+}
+
+.chip-handle {
+  cursor: grab;
+  font-size: 12px;
+  margin-right: 2px;
+  color: var(--ink-400);
 }
 
 .chip-index {
