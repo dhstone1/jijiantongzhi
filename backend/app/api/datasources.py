@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -48,14 +49,16 @@ def list_datasources(mobile: str = Query(""), db: Session = Depends(get_db)):
     if mobile:
         caller = db.query(Staff).filter(Staff.mobile == mobile).first()
         if caller is not None and caller.role != "admin":
-            permitted_ids = [
-                r.resource_id
-                for r in db.query(ResourcePermission).filter(
-                    ResourcePermission.resource_type == "datasource",
-                    ResourcePermission.mobile == mobile,
-                ).all()
-            ]
-            query = query.filter(DataSource.id.in_(permitted_ids) if permitted_ids else False)
+            # 按资源判断可见性：没被人勾过的数据源对所有人开放；
+            # 一旦有人被勾上，就只有勾上的人能看到（跟界面上的说明一致）
+            granted = select(ResourcePermission.resource_id).where(
+                ResourcePermission.resource_type == "datasource"
+            )
+            mine = select(ResourcePermission.resource_id).where(
+                ResourcePermission.resource_type == "datasource",
+                ResourcePermission.mobile == mobile,
+            )
+            query = query.filter(or_(~DataSource.id.in_(granted), DataSource.id.in_(mine)))
     return [_to_dict(item) for item in query.order_by(DataSource.id).all()]
 
 

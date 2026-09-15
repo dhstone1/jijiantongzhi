@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..config import IMAGE_DIR, IMAGE_URL_PREFIX, SERVER_PORT
@@ -252,14 +253,16 @@ def list_bots(mobile: str = Query(""), db: Session = Depends(get_db)):
     if mobile:
         caller = db.query(Staff).filter(Staff.mobile == mobile).first()
         if caller is not None and caller.role != "admin":
-            permitted_ids = [
-                r.resource_id
-                for r in db.query(ResourcePermission).filter(
-                    ResourcePermission.resource_type == "dingtalk_bot",
-                    ResourcePermission.mobile == mobile,
-                ).all()
-            ]
-            query = query.filter(DingTalkBot.id.in_(permitted_ids) if permitted_ids else False)
+            # 按资源判断可见性：没被人勾过的群对所有人开放；
+            # 一旦有人被勾上，就只有勾上的人能看到（跟界面上的说明一致）
+            granted = select(ResourcePermission.resource_id).where(
+                ResourcePermission.resource_type == "dingtalk_bot"
+            )
+            mine = select(ResourcePermission.resource_id).where(
+                ResourcePermission.resource_type == "dingtalk_bot",
+                ResourcePermission.mobile == mobile,
+            )
+            query = query.filter(or_(~DingTalkBot.id.in_(granted), DingTalkBot.id.in_(mine)))
     items = query.order_by(DingTalkBot.id).all()
     return [
         {
