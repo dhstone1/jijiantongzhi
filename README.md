@@ -345,37 +345,6 @@ Excel 文件和报表图片共用「图片保留天数」，到期一起清理�
 ---
 
 ## 三、项目结构
-
-```
-jijiantongzhi/
-├─ 启动系统.bat / 停止系统.bat    一键启停
-├─ backend/                      后端 FastAPI
-│  ├─ app/
-│  │  ├─ main.py                 入口 + 启动调度器
-│  │  ├─ config.py               配置（全部可用环境变量覆盖）
-│  │  ├─ models.py  schemas.py   数据模型与出入参
-│  │  ├─ security.py             凭据流加密（webhook / 密码不明文落库）
-│  │  ├─ seed.py                 首次启动初始化演示数据
-│  │  ├─ api/                    接口层：basic / datasources / rules / logs
-│  │  └─ services/
-│  │     ├─ sql_builder.py       安全 SQL 构建（WHERE / HAVING）+ 归属地归一 + 时长指标
-│  │     ├─ trigger.py           触发判定（报表 / 阈值 / 同一字段累计）与冷却计算
-│  │     ├─ region_norm.py       归属地归一化（内置邢台 18 区县字典）
-│  │     ├─ renderer.py          模板渲染 + 对齐表格
-│  │     ├─ image_renderer.py    报表渲染成 PNG（Pillow）
-│  │     ├─ image_store.py       图片落盘 / 访问地址 / 过期清理
-│  │     ├─ sample_parser.py     样例报表解析（表头探测 / 去重 / 汇总行识别）
-│  │     ├─ field_matcher.py     样例列 → 数据库字段智能匹配
-│  │     ├─ dingtalk.py          Webhook 发送（加签 / atMobiles）
-│  │     ├─ executor.py          规则执行器
-│  │     └─ scheduler.py         APScheduler 调度
-│  ├─ data/                      系统库 + 演示业务库（SQLite）
-│  └─ run.bat
-├─ frontend/                     前端 Vue 3 + Element Plus
-│  └─ src/views/                 概览 / 规则 / 数据源 / 钉钉群 / 归属地 / 人员 / 记录 / 系统设置
-└─ docs/需求说明.md               需求说明书
-```
-
 ---
 
 ## 四、配置项
