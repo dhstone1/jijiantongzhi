@@ -287,26 +287,29 @@ def _build_where(
     where: list[str] = []
     having: list[str] = []
 
-    # --- 归属地过滤：始终第一个条件，任何配置都无法绕过 ---
-    if region_field and region_value:
+    # --- 归属地过滤：要求过滤就必须真的加上，配不出来直接拒绝 ---
+    # 原来这里是「region_field 为空或不认识这个字段就只写条警告然后放行」，
+    # 等于把「按归属地隔离」变成了尽力而为：随手填个不存在的列名就能读全省。
+    if region_value:
+        if not region_field:
+            raise ValueError("规则没有配归属地字段，无法按归属地取数，请到「归属地字段」里选一个")
         if region_field not in table_columns:
-            warnings.append(f"归属地字段「{region_field}」不在所选表中，未生效")
-        else:
-            variants = region_scope_variants(region_value, normalizer)
-            keys = []
-            for index, variant in enumerate(variants):
-                key = f"_region_{index}"
-                params[key] = variant
-                keys.append(f":{key}")
-            where.append(f"{preparer.quote(region_field)} IN ({', '.join(keys)})")
-            scope_size = len(region_value) if not isinstance(region_value, str) else 1
-            if scope_size > 1:
-                warnings.append(
-                    f"归属地按 {scope_size} 个行政区的 {len(variants)} 种写法匹配"
-                    "（含下属区县与别名）"
-                )
-            elif len(variants) > 1:
-                warnings.append(f"归属地按 {len(variants)} 种写法匹配（含别名）")
+            raise ValueError(f"归属地字段「{region_field}」不在所选表中，请重新选择")
+        variants = region_scope_variants(region_value, normalizer)
+        keys = []
+        for index, variant in enumerate(variants):
+            key = f"_region_{index}"
+            params[key] = variant
+            keys.append(f":{key}")
+        where.append(f"{preparer.quote(region_field)} IN ({', '.join(keys)})")
+        scope_size = len(region_value) if not isinstance(region_value, str) else 1
+        if scope_size > 1:
+            warnings.append(
+                f"归属地按 {scope_size} 个行政区的 {len(variants)} 种写法匹配"
+                "（含下属区县与别名）"
+            )
+        elif len(variants) > 1:
+            warnings.append(f"归属地按 {len(variants)} 种写法匹配（含别名）")
 
     # --- 用户自定义条件 ---
     for filter_item in cfg.get("filters") or []:
@@ -450,7 +453,10 @@ def _build_raw(
     warnings: list[str] = []
     params: dict = {}
 
-    if region_field and region_value:
+    if region_value:
+        # 同样改成 fail closed：需要过滤就必须带占位符，且不能再靠占位符的位置
+        # 去猜意图——自定义 SQL 只对省级管理员开放（见 api/rules.py），
+        # 那里的调用者本来就能看全省，所以只保留「必须带占位符」这一条硬性要求。
         if "{region}" not in raw:
             raise ValueError("自定义 SQL 必须包含 {region} 占位符，系统需要据此注入归属地过滤")
         variants = region_scope_variants(region_value, normalizer)

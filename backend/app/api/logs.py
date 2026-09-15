@@ -15,7 +15,9 @@ router = APIRouter()
 def _guard_log(db: Session, mobile: str, item: SendLog) -> None:
     """单条记录的读权限：省级随便看，其他人只能看自己作用域内规则的记录。"""
     caller = db.query(Staff).filter(Staff.mobile == mobile).first() if mobile else None
-    if caller is None or scope.is_province(caller.role):
+    if caller is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+    if scope.is_province(caller.role):
         return
     rule = db.get(PushRule, item.rule_id) if item.rule_id else None
     allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()

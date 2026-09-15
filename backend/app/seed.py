@@ -488,5 +488,15 @@ def ensure_seed() -> None:
         ensure_staff_roles(db)
         ensure_demo_rule(db)
         ensure_demo_alert_rule(db)
+        rotate_stored_secrets(db)
     finally:
         db.close()
+
+
+def rotate_stored_secrets(db) -> None:
+    """把旧格式密文换成当前密钥，避免继续用源码里的公开默认密钥。"""
+    from .security import reencrypt_stored_secrets
+
+    changed = reencrypt_stored_secrets(db)
+    if changed:
+        logger.info("已用当前密钥重新加密 %d 条凭据", changed)

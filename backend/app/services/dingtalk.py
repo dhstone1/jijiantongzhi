@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import os
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -15,6 +16,20 @@ from dataclasses import dataclass
 import requests
 
 TIMEOUT = 10
+
+# 只允许往钉钉的域名发消息。以前 webhook 是可写字段又没有校验，
+# 改掉它就能把服务端当代理去请求任意地址（还能回显对方响应片段）。
+ALLOWED_HOST_SUFFIXES = tuple(
+    item.strip().lower()
+    for item in (
+        os.getenv("APP_DINGTALK_HOST_ALLOWLIST") or "dingtalk.com,dingtalk.com.cn"
+    ).split(",")
+    if item.strip()
+)
+
+
+class WebhookRejected(ValueError):
+    """webhook 地址不在允许范围内。"""
 
 
 @dataclass
@@ -37,6 +52,23 @@ def build_url(webhook: str, secret: str = "") -> str:
     timestamp = int(time.time() * 1000)
     separator = "&" if "?" in url else "?"
     return f"{url}{separator}timestamp={timestamp}&sign={sign(secret, timestamp)}"
+
+
+def validate_webhook(webhook: str) -> None:
+    """webhook 必须是 https 且指向钉钉的域名，否则拒绝发出去。"""
+    raw = (webhook or "").strip()
+    if not raw:
+        raise WebhookRejected("未配置 Webhook 地址")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https":
+        raise WebhookRejected("Webhook 必须是 https 地址")
+    host = (parsed.hostname or "").lower()
+    if not host or not any(
+        host == suffix or host.endswith("." + suffix) for suffix in ALLOWED_HOST_SUFFIXES
+    ):
+        raise WebhookRejected(
+            "Webhook 只能指向钉钉域名（可在系统设置里调整允许的域名）"
+        )
 
 
 def append_mentions(text: str, at_mobiles: list[str], at_all: bool) -> str:
@@ -119,12 +151,20 @@ def _post(webhook: str, secret: str, payload: dict) -> SendResult:
     if not webhook:
         return SendResult(ok=False, message="未配置 Webhook 地址")
     try:
-        response = requests.post(build_url(webhook, secret), json=payload, timeout=TIMEOUT)
+        validate_webhook(webhook)
+    except WebhookRejected as exc:
+        return SendResult(ok=False, message=str(exc))
+    try:
+        # 不跟随重定向：允许的话，一个 30x 就能把请求带到内网地址
+        response = requests.post(
+            build_url(webhook, secret), json=payload, timeout=TIMEOUT, allow_redirects=False
+        )
         data = response.json()
     except requests.RequestException as exc:
-        return SendResult(ok=False, message=f"网络错误：{exc}")
+        return SendResult(ok=False, message=f"网络错误：{type(exc).__name__}")
     except ValueError:
-        return SendResult(ok=False, message=f"返回内容无法解析：{response.text[:200]}")
+        # 不回显响应正文：它可能来自被探测的内网服务
+        return SendResult(ok=False, message=f"返回内容无法解析（HTTP {response.status_code}）")
 
     if data.get("errcode") == 0:
         return SendResult(ok=True, message="发送成功", raw=data)

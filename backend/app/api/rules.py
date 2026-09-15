@@ -9,6 +9,9 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from ..config import IMAGE_URL_PREFIX
+
+# 预览最多取这么多行：limit 由调用者传，必须在服务端封顶
+MAX_PREVIEW_ROWS = 500
 from ..db import get_db
 from ..models import DataSource, PushRule, Staff
 from ..schemas import PreviewIn, RuleIn
@@ -91,13 +94,58 @@ def _caller_scope(db: Session, caller: Staff) -> set[str] | None:
 def _guard_rule_write(db: Session, caller: Staff | None, rule: PushRule) -> None:
     """规则写权限：普通人员不能改；非省级只能动自己作用域内的规则。"""
     if caller is None:
-        return
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
     if scope.is_province(caller.role):
         return
     if not scope.is_city(caller.role):
         raise HTTPException(status_code=403, detail="普通人员不能修改推送规则")
     if not scope.can_see_region(_caller_scope(db, caller), rule.region_name):
         raise HTTPException(status_code=403, detail="无权修改其他归属地的规则")
+
+
+def _visible_bot_ids(db: Session, caller: Staff) -> set[int]:
+    """这个调用者能用的钉钉群，跟 GET /api/bots 的口径保持一致。"""
+    from ..models import DingTalkBot, ResourcePermission
+
+    bots = db.query(DingTalkBot).all()
+    if scope.is_province(caller.role):
+        return {bot.id for bot in bots}
+    allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+    rows = db.query(ResourcePermission).filter(
+        ResourcePermission.resource_type == "dingtalk_bot"
+    ).all()
+    granted = {row.resource_id for row in rows}
+    mine = {row.resource_id for row in rows if row.mobile == caller.mobile}
+    return {
+        bot.id
+        for bot in bots
+        if (bot.region_name or "").strip() in allowed
+        and not (bot.id in granted and bot.id not in mine)
+    }
+
+
+def _guard_rule_payload(db: Session, caller: Staff | None, payload: RuleIn) -> None:
+    """规则里的取数方式和推送目标都必须落在调用者权限内。"""
+    if caller is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+    if not scope.is_province(caller.role):
+        if str((payload.query or {}).get("mode") or "").lower() == "sql":
+            raise HTTPException(status_code=403, detail="自定义 SQL 只有省级管理员能用")
+        if not (payload.region_field or "").strip():
+            # 没有归属地字段就构造不出归属地过滤，宁可不让存
+            raise HTTPException(
+                status_code=400, detail="请先选好「归属地字段」，否则无法按归属地取数"
+            )
+    outside = [
+        bot_id
+        for bot_id in (payload.bot_ids or [])
+        if bot_id not in _visible_bot_ids(db, caller)
+    ]
+    if outside:
+        raise HTTPException(
+            status_code=403,
+            detail=f"推送目标里有不在你权限范围内的钉钉群：{outside}",
+        )
 
 
 @router.get("/rules/{rule_id}")
@@ -119,6 +167,7 @@ def create_rule(payload: RuleIn, mobile: str = Query(""), db: Session = Depends(
         allowed = _caller_scope(db, caller) or set()
         if region_name not in allowed:
             region_name = caller.region_name
+    _guard_rule_payload(db, caller, payload)
 
     rule = PushRule(
         name=payload.name,
@@ -160,6 +209,7 @@ def update_rule(rule_id: int, payload: RuleIn, mobile: str = Query(""), db: Sess
             raise HTTPException(status_code=403, detail="无权修改其他归属地的规则")
         if payload.region_name and payload.region_name not in allowed:
             raise HTTPException(status_code=403, detail="只能把规则挂到本地市的归属地")
+    _guard_rule_payload(db, caller, payload)
 
     rule.name = payload.name
     rule.data_source_id = payload.data_source_id
@@ -222,15 +272,31 @@ def run_rule_now(rule_id: int, mobile: str = Query(""), db: Session = Depends(ge
 
 
 @router.post("/rules/preview")
-def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
+def preview_rule(payload: PreviewIn, mobile: str = Query(""), db: Session = Depends(get_db)):
     """按当前配置取数并渲染，不发送。用于编辑时的实时预览。"""
+    caller = _resolve_caller(db, mobile)
+    if caller is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+
+    region_name = payload.region_name or ""
+    if not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        # 非省级：归属地必须在自己的作用域里，不填就按自己的归属地取
+        if region_name and region_name not in allowed:
+            raise HTTPException(status_code=403, detail="只能预览本地市的数据")
+        region_name = region_name or caller.region_name
+        if str((payload.query or {}).get("mode") or "").lower() == "sql":
+            raise HTTPException(status_code=403, detail="自定义 SQL 只有省级管理员能用")
+
     ds = db.get(DataSource, payload.data_source_id)
     if ds is None:
         raise HTTPException(status_code=404, detail="数据源不存在")
 
     normalizer = RegionNormalizer.from_db(db)
     cfg = dict(payload.query or {})
-    cfg["limit"] = payload.limit
+    # 预览行数由服务端封顶，不能让调用者用 limit 把内存撑爆
+    preview_limit = max(1, min(int(payload.limit or 50), MAX_PREVIEW_ROWS))
+    cfg["limit"] = preview_limit
 
     try:
         table = cfg.get("table") or ""
@@ -245,9 +311,9 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
             metadata.get_engine(ds),
             region_field=payload.region_field,
             # 归属地挂在地市上时，连带下属区县一起取，跟正式发送保持一致
-            region_value=scope.region_filter_value(db, payload.region_name),
+            region_value=scope.region_filter_value(db, region_name),
             normalizer=normalizer,
-            max_rows=payload.limit,
+            max_rows=preview_limit,
         )
 
         from sqlalchemy import text
@@ -383,7 +449,9 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
 
 
 @router.post("/rules/suggest-template")
-def suggest_template(payload: dict):
+def suggest_template(payload: dict, mobile: str = Query(""), db: Session = Depends(get_db)):
+    if _resolve_caller(db, mobile) is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
     title = payload.get("title") or "数据通报"
     columns = payload.get("columns") or []
     time_field = payload.get("time_field") or ""
@@ -396,9 +464,15 @@ def suggest_template(payload: dict):
 async def parse_sample_file(
     file: UploadFile = File(...),
     data_source_id: int | None = Query(None),
+    mobile: str = Query(""),
     db: Session = Depends(get_db),
 ):
     """上传一份「期望的报表样式」，系统解析它的结构与字段，用来推荐模板和字段。"""
+    caller = _resolve_caller(db, mobile)
+    if caller is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+    if not scope.can_manage_region(caller.role):
+        raise HTTPException(status_code=403, detail="普通人员不能上传样例")
     suffix = Path(file.filename or "sample.xlsx").suffix.lower() or ".xlsx"
     if suffix not in (".xlsx", ".xlsm", ".csv"):
         raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv 文件")

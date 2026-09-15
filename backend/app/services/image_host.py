@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
+import os
 import time
+import urllib.parse
 
 import requests
 
@@ -19,6 +21,32 @@ UPLOAD_URL = "https://www.beeimg.cn/api/v2/upload"
 TIMEOUT = 30
 # 撞上频率限制时等一会儿再试一次，运营人员不必关心限流
 RETRY_WAIT = 6
+
+# 只允许往白名单里的图床域名上传。上传地址是可以在系统设置里改的，
+# 不限制的话，把地址改成一个内网服务，就能拿服务端当代理去请求它。
+ALLOWED_UPLOAD_HOSTS = tuple(
+    item.strip().lower()
+    for item in (
+        os.getenv("APP_IMAGE_HOST_ALLOWLIST") or "beeimg.cn,boltp.com"
+    ).split(",")
+    if item.strip()
+)
+
+
+def validate_target(url: str) -> str:
+    """上传目标必须是 https 且在白名单域名下。"""
+    raw = (url or "").strip() or UPLOAD_URL
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "https":
+        raise UploadError("图床上传地址必须是 https")
+    host = (parsed.hostname or "").lower()
+    if not host or not any(
+        host == allowed or host.endswith("." + allowed) for allowed in ALLOWED_UPLOAD_HOSTS
+    ):
+        raise UploadError(
+            "图床上传地址不在允许的域名里，请在「系统设置」里改成受信任的图床"
+        )
+    return raw
 
 # 图床可能把这些话术放在 429 里，也可能放在 200 + status != success 里
 RATE_LIMIT_HINTS = ("429", "频率", "只能上传", "too many", "rate limit")
@@ -140,6 +168,8 @@ def upload_file(
     """
     global _working_style
 
+    target = validate_target(url or UPLOAD_URL)
+
     base_data = _fields(
         storage_id,
         expired_at=expired_at,
@@ -162,30 +192,35 @@ def upload_file(
         for attempt in range(2):
             try:
                 response = requests.post(
-                    url or UPLOAD_URL,
+                    target,
                     files={"file": (filename, content, content_type)},
                     data=data,
                     headers=headers,
                     timeout=TIMEOUT,
+                    # 不跟随重定向：否则允许的域名可以 30x 把我们带到任意内网地址
+                    allow_redirects=False,
                 )
             except requests.RequestException as exc:
-                raise UploadError(f"网络错误：{exc}") from exc
+                raise UploadError(f"网络错误：{type(exc).__name__}") from exc
 
             if response.status_code == 422:
                 raise UploadError(f"图床返回 422：参数不对{_field_errors(response)}")
             if response.status_code == 429:
-                message = response.text[:120]
+                message = "请求过于频繁"
                 if attempt == 0:
                     time.sleep(RETRY_WAIT)
                     continue
                 raise UploadError(_rate_limit_message(message))
             if response.status_code >= 400:
-                raise UploadError(f"图床返回 {response.status_code}：{response.text[:200]}")
+                # 不回显上游响应正文：目标地址由设置决定，正文可能来自被探测的内网服务
+                raise UploadError(f"图床返回 HTTP {response.status_code}")
 
             try:
                 payload = response.json()
             except ValueError as exc:
-                raise UploadError(f"图床返回内容无法解析：{response.text[:200]}") from exc
+                raise UploadError(
+                    f"图床返回内容无法解析（HTTP {response.status_code}）"
+                ) from exc
 
             if str(payload.get("status", "")).lower() != "success":
                 message = str(payload.get("message") or str(payload)[:200])

@@ -6,18 +6,8 @@ const http = axios.create({
   timeout: 60000,
 })
 
-http.interceptors.response.use(
-  (response) => response.data,
-  (error) => {
-    const detail = error?.response?.data?.detail
-    const message = typeof detail === 'string' ? detail : error.message || '请求失败'
-    ElMessage.error(message)
-    return Promise.reject(error)
-  },
-)
-
-// 后端没有登录态，所有需要按归属地收敛的接口都靠这个手机号识别调用者。
-// 这里统一带上，免得每个调用点都要记得传一次。
+// 后端没有登录态，所有 /api 请求都要带一个已登记的手机号，否则一律 401。
+// 放在拦截器里统一注入，免得某个调用点忘了传。
 const USER_KEY = 'jijiantongzhi.user'
 
 function currentMobile() {
@@ -27,6 +17,32 @@ function currentMobile() {
     return ''
   }
 }
+
+http.interceptors.request.use((config) => {
+  const mobile = currentMobile()
+  if (!mobile) return config
+  // 登录接口自己带 body，不需要查询参数
+  if (config.url === '/session/login') return config
+  config.params = { mobile, ...(config.params || {}) }
+  return config
+})
+
+http.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    // 身份失效（被删号 / 换了浏览器）时退回登录页，别让人对着错误发呆
+    if (error?.response?.status === 401) {
+      localStorage.removeItem(USER_KEY)
+      if (!window.location.hash.startsWith('#/login')) {
+        window.location.hash = '#/login'
+      }
+    }
+    const detail = error?.response?.data?.detail
+    const message = typeof detail === 'string' ? detail : error.message || '请求失败'
+    ElMessage.error(message)
+    return Promise.reject(error)
+  },
+)
 
 function withMe(params = {}) {
   return { mobile: currentMobile(), ...params }

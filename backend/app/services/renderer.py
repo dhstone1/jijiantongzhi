@@ -29,6 +29,38 @@ BUILTIN_KEYS = {"行数", "日期", "时间", "表格", "列表"}
 # {{表格}} 的呈现方式（规则 query.table_style）
 TABLE_STYLES = ("code", "plain", "md")
 
+# 高亮颜色只接受 #RGB/#RRGGBB 这类字面量或几个常见色名。
+# 这个值会被拼进 <font color="...">，不校验就能闭合属性注入任意标记。
+HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{3,8}$")
+NAMED_COLORS = {
+    "red", "green", "blue", "orange", "yellow", "purple", "brown",
+    "pink", "gray", "grey", "black", "white",
+}
+DEFAULT_HIGHLIGHT_COLOR = "#FF0000"
+
+
+def safe_color(value: object) -> str:
+    text = str(value or "").strip()
+    if HEX_COLOR.match(text):
+        return text
+    if text.lower() in NAMED_COLORS:
+        return text.lower()
+    return DEFAULT_HIGHLIGHT_COLOR
+
+
+def escape_text(value: object) -> str:
+    """把数据里的标记字符转义掉。
+
+    钉钉 markdown 正文里的 <font> 之类标签是会被解析的，而单元格内容来自业务库，
+    不转义就等于允许能写业务行的人往公司群的通报里插任意链接和图片。
+    """
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
 # 运营人员偶尔会写成英文，这里做一层等价映射，避免模板报「字段不存在」
 KEY_ALIASES = {
     "count": "行数",
@@ -121,7 +153,7 @@ def render_template(
             if alias and alias in context:
                 return context[alias]
             if key in (first or {}):
-                return _value(first, key)
+                return escape_text(_value(first, key))
             warnings.append(f"模板里的 {{{{ {key} }}}} 在数据里找不到，已原样保留")
             return match.group(0)
 
@@ -135,7 +167,7 @@ def render_template(
         parts = []
         for index, row in enumerate(rows, start=1):
             local = dict(context)
-            local.update({k: _value(row, k) for k in row})
+            local.update({k: escape_text(_value(row, k)) for k in row})
             local["序号"] = str(index)
             local["__row__"] = row
             text = body
@@ -184,7 +216,7 @@ def _highlight_cell(
     if not allow_html:
         # 代码块里 HTML 标签不会渲染，只会原样显示成源码，所以不加
         return value
-    color = highlight.get("color") or "#FF0000"
+    color = safe_color(highlight.get("color"))
     return f'<font color="{color}">{value}</font>'
 
 
@@ -212,6 +244,7 @@ def render_aligned_table(
     for row, values in zip(rows, body):
         cells = []
         for index, value in enumerate(values):
+            value = escape_text(value)
             if display_width(value) > widths[index]:
                 value = value[: widths[index] - 1] + "…"
             cells.append(
@@ -225,7 +258,13 @@ def render_aligned_table(
 
 def _escape_cell(text: str) -> str:
     """Markdown 表格里的竖线和换行会撑破单元格，先转义掉。"""
-    return str(text).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+    return (
+        escape_text(text)
+        .replace("\\", "\\\\")
+        .replace("|", "\\|")
+        .replace("\n", " ")
+        .strip()
+    )
 
 
 def render_markdown_table(
@@ -281,7 +320,7 @@ def render_list(rows: list[dict], columns: list[str]) -> str:
         return "（无数据）"
     lines = []
     for index, row in enumerate(rows, start=1):
-        parts = [f"**{column}** {_value(row, column)}" for column in columns]
+        parts = [f"**{column}** {escape_text(_value(row, column))}" for column in columns]
         lines.append(f"{index}. " + " ｜ ".join(parts))
     return "\n".join(lines)
 

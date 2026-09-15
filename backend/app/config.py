@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -11,8 +12,33 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # 系统自身数据库（SQLite 起步，可换成 PostgreSQL）
 SYSTEM_DB_URL = os.getenv("SYSTEM_DB_URL", f"sqlite:///{DATA_DIR / 'system.db'}")
 
-# 敏感信息加密密钥。生产环境务必通过环境变量设置。
-SECRET_KEY = os.getenv("APP_SECRET_KEY", "jijiantongzhi-dev-secret-key-change-me")
+# 敏感信息加密密钥。
+# 以前这里直接兜底成源码里的固定字符串，等于所有部署共用一把公开的钥匙。
+# 现在改成：环境变量优先；没设置就在数据目录里生成一把随机密钥并持久化。
+SECRET_KEY_FILE = DATA_DIR / "secret.key"
+
+# 旧版本写死的默认密钥，只用于解开历史密文，解密后会自动用新密钥重新加密
+LEGACY_SECRET_KEY = "jijiantongzhi-dev-secret-key-change-me"
+
+
+def _resolve_secret_key() -> tuple[str, bool]:
+    env_value = (os.getenv("APP_SECRET_KEY") or "").strip()
+    if env_value:
+        return env_value, False
+    if SECRET_KEY_FILE.exists():
+        stored = SECRET_KEY_FILE.read_text(encoding="utf-8").strip()
+        if stored:
+            return stored, True
+    generated = secrets.token_urlsafe(48)
+    SECRET_KEY_FILE.write_text(generated, encoding="utf-8")
+    try:
+        SECRET_KEY_FILE.chmod(0o600)
+    except OSError:  # Windows 上 chmod 语义有限，忽略
+        pass
+    return generated, True
+
+
+SECRET_KEY, SECRET_KEY_AUTO_GENERATED = _resolve_secret_key()
 
 # 演示业务库（模拟公共数据库）的位置
 DEMO_DB_PATH = DATA_DIR / "demo_business.db"

@@ -22,6 +22,10 @@ from ..services.region_norm import DEFAULT_REGIONS, PARENT_CITY, RegionNormalize
 
 router = APIRouter()
 
+# 导入文件的大小与行数上限：不设限的话，一个精心构造的 xlsx 就能把进程内存吃光
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_IMPORT_ROWS = 20000
+
 
 def _xlsx_response(content: bytes, filename: str) -> Response:
     return Response(
@@ -338,10 +342,17 @@ def _read_table(file: UploadFile) -> tuple["object", list[str]]:
         raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv 文件")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-        handle.write(file.file.read())
+        # 整个读进内存前先卡住大小：xlsx 解压后会膨胀很多，不设限就能把进程撑爆
+        payload = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(payload) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"文件太大，请控制在 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB 以内",
+            )
+        handle.write(payload)
         temp_path = handle.name
     try:
-        df = pd.read_excel(temp_path, dtype=str).fillna("")
+        df = pd.read_excel(temp_path, dtype=str, nrows=MAX_IMPORT_ROWS).fillna("")
     except Exception as exc:  # noqa: BLE001 - 解析失败就当作用户填错
         raise HTTPException(status_code=400, detail=f"读取文件失败：{exc}") from exc
     finally:
@@ -371,7 +382,8 @@ def _guard_staff_write(db, caller_role, caller_region, region_name, role) -> Non
     拿对象进来会在赋完新角色后把自己认成省级，直接放行。
     """
     if caller_role is None:
-        return
+        # 有身份闸门兜底，走到这里说明闸门被绕过了：宁可拒绝也不要放开
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
     if scope.is_province(caller_role):
         return
     if not scope.is_city(caller_role):
@@ -386,9 +398,28 @@ def _guard_staff_write(db, caller_role, caller_region, region_name, role) -> Non
 def _require_region_manager(caller_role: str | None, action: str = "修改这类配置") -> None:
     """归属地字典 / 钉钉群的写操作：省级和地市管理员才能动。"""
     if caller_role is None:
-        return
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
     if not scope.can_manage_region(caller_role):
         raise HTTPException(status_code=403, detail=f"普通人员不能{action}")
+
+
+def _require_province(caller_role: str | None, action: str = "这项操作") -> None:
+    """全省级配置（数据源、系统设置）只有省级管理员能动。"""
+    if caller_role is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+    if not scope.is_province(caller_role):
+        raise HTTPException(status_code=403, detail=f"只有省级管理员能{action}")
+
+
+def _guard_bot_scope(db, caller: Staff | None, bot) -> None:
+    """地市管理员只能动挂在自己地市名下的群；省级不受限。"""
+    if caller is None:
+        raise HTTPException(status_code=401, detail="未识别到身份，请重新登录")
+    if scope.is_province(caller.role):
+        return
+    allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+    if (bot.region_name or "").strip() not in allowed:
+        raise HTTPException(status_code=403, detail="无权操作其他地市的钉钉群")
 
 
 @router.get("/staff")
@@ -660,14 +691,22 @@ def delete_bot(bot_id: int, mobile: str = Query(""), db: Session = Depends(get_d
 
 
 @router.post("/bots/{bot_id}/test")
-def test_bot(bot_id: int, payload: dict | None = None, db: Session = Depends(get_db)):
+def test_bot(
+    bot_id: int,
+    mobile: str = Query(""),
+    db: Session = Depends(get_db),
+):
     from datetime import datetime
 
     bot = db.get(DingTalkBot, bot_id)
     if bot is None:
         raise HTTPException(status_code=404, detail="机器人不存在")
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller), action="测试钉钉群")
+    _guard_bot_scope(db, caller, bot)
 
-    text = (payload or {}).get("text") or (
+    # 测试消息固定由服务端生成：原来允许调用者自带 text，等于把系统身份借出去发任意内容
+    text = (
         f"#### 推送配置测试\n> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         "这条消息来自「运营数据推送系统」，说明 Webhook 配置正确。"
     )
@@ -691,8 +730,10 @@ def test_bot(bot_id: int, payload: dict | None = None, db: Session = Depends(get
 def list_permissions(
     resource_type: str = Query(...),
     resource_id: int = Query(...),
+    mobile: str = Query(""),
     db: Session = Depends(get_db),
 ):
+    _require_province(_caller_role(_resolve_caller(db, mobile)), action="查看可见权限")
     items = (
         db.query(ResourcePermission)
         .filter(
@@ -705,8 +746,15 @@ def list_permissions(
 
 
 @router.post("/permissions")
-def grant_permissions(payload: PermissionGrantIn, db: Session = Depends(get_db)):
+def grant_permissions(
+    payload: PermissionGrantIn,
+    mobile: str = Query(""),
+    db: Session = Depends(get_db),
+):
     """全量覆盖：传入的手机号列表即为该资源所有可见人员。"""
+    _require_province(
+        _caller_role(_resolve_caller(db, mobile)), action="修改可见权限"
+    )
     resource_type = payload.resource_type
     resource_id = payload.resource_id
 
@@ -744,8 +792,9 @@ def grant_permissions(payload: PermissionGrantIn, db: Session = Depends(get_db))
 # ---------------------------------------------------------------- 系统设置
 
 @router.get("/settings")
-def get_settings(db: Session = Depends(get_db)) -> dict:
+def get_settings(mobile: str = Query(""), db: Session = Depends(get_db)) -> dict:
     """图片推送相关的系统级设置。"""
+    _require_province(_caller_role(_resolve_caller(db, mobile)), action="查看系统设置")
     base = image_store.get_setting(db, image_store.SETTING_BASE_URL, "")
     days = image_store.get_setting(db, image_store.SETTING_RETENTION, str(image_store.IMAGE_RETENTION_DAYS))
     try:
@@ -785,7 +834,8 @@ def image_renderer_font_ok() -> bool:
 
 
 @router.put("/settings")
-def update_settings(payload: SettingsIn, db: Session = Depends(get_db)) -> dict:
+def update_settings(payload: SettingsIn, mobile: str = Query(""), db: Session = Depends(get_db)) -> dict:
+    _require_province(_caller_role(_resolve_caller(db, mobile)), action="修改系统设置")
     if payload.public_base_url is not None:
         image_store.set_setting(db, image_store.SETTING_BASE_URL, payload.public_base_url.strip())
     if payload.image_retention_days is not None:
@@ -814,13 +864,17 @@ def update_settings(payload: SettingsIn, db: Session = Depends(get_db)) -> dict:
         )
     # 回显的是脱敏值，只有真正改动时才覆盖
     if payload.beeimg_token and "*" not in payload.beeimg_token:
-        image_store.set_setting(db, image_store.SETTING_BEEIMG_TOKEN, payload.beeimg_token.strip())
+        # 和图床口令一样加密落库
+        image_store.set_setting(
+            db, image_store.SETTING_BEEIMG_TOKEN, encrypt(payload.beeimg_token.strip())
+        )
     return get_settings(db)
 
 
 @router.post("/settings/test-image-host")
-def test_image_host(db: Session = Depends(get_db)) -> dict:
+def test_image_host(mobile: str = Query(""), db: Session = Depends(get_db)) -> dict:
     """真传一张小图上去，验证图床配置能不能用。"""
+    _require_province(_caller_role(_resolve_caller(db, mobile)), action="测试图床")
     from datetime import datetime as dt
 
     from ..services import image_host, image_renderer

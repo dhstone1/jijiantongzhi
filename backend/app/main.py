@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import seed
 from .api import basic, datasources, logs, rules
+from .auth import IdentityMiddleware
 from .config import IMAGE_DIR, IMAGE_URL_PREFIX
 from .db import init_db
 from .services import scheduler
@@ -33,13 +35,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="运营数据推送系统", version="1.0.0", lifespan=lifespan)
 
+# 谁都不带凭据的跨站请求没理由读得到接口结果。前端是同源访问，不需要放开通配来源。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=os.getenv("APP_CORS_ORIGINS", "").split(",") if os.getenv("APP_CORS_ORIGINS") else [],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept"],
 )
+
+# 认证在 CORS 之后注册：Starlette 后注册的中间件在最外层，身份闸门先跑，
+# 401 也就能带上正确的 CORS 头。
+app.add_middleware(IdentityMiddleware)
 
 app.include_router(basic.router, prefix="/api", tags=["基础配置"])
 app.include_router(datasources.router, prefix="/api", tags=["数据源"])
@@ -54,4 +61,3 @@ app.mount(IMAGE_URL_PREFIX, StaticFiles(directory=IMAGE_DIR), name="reports")
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
-

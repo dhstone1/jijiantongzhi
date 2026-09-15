@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..config import DATA_DIR, IMAGE_DIR, IMAGE_RETENTION_DAYS, IMAGE_URL_PREFIX, PUBLIC_BASE_URL
 from ..models import AppSetting
+from ..security import decrypt, encrypt
 from . import image_host
 
 SETTING_BASE_URL = "public_base_url"
@@ -102,7 +103,8 @@ def beeimg_config(db: Session, intro: str = "") -> dict:
     tags / album_id / is_public 只有登录态（配了令牌）才生效，
     没配令牌时就不传，免得匿名上传被图床判成参数错误。
     """
-    token = get_setting(db, SETTING_BEEIMG_TOKEN, "")
+    # 图床令牌和其它凭据一样加密存储，读出来再用
+    token = decrypt(get_setting(db, SETTING_BEEIMG_TOKEN, ""))
     config = {
         "url": get_setting(db, SETTING_BEEIMG_URL, image_host.UPLOAD_URL) or image_host.UPLOAD_URL,
         "storage_id": get_setting(db, SETTING_BEEIMG_STORAGE, "4") or "4",
