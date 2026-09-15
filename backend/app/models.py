@@ -100,6 +100,8 @@ class PushRule(Base):
     at_json: Mapped[str] = mapped_column(Text, default="{}")
     # 是否把报表渲染成图片发送，以及图片标题、行数上限等
     image_json: Mapped[str] = mapped_column(Text, default="{}")
+    # ActionCard 卡片设置：{title, btn_title, btn_url, btn_orientation}
+    card_json: Mapped[str] = mapped_column(Text, default="{}")
 
     schedule_type: Mapped[str] = mapped_column(String(16), default="manual")
     schedule_json: Mapped[str] = mapped_column(Text, default="{}")

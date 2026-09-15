@@ -39,6 +39,10 @@ def load_image_config(rule: PushRule) -> dict:
     return _loads(rule.image_json, {})
 
 
+def load_card_config(rule: PushRule) -> dict:
+    return _loads(rule.card_json, {})
+
+
 def _int(value, default: int) -> int:
     try:
         return int(value)
@@ -307,24 +311,41 @@ def run_rule(
         )
         result["image_url"] = image_url
 
+        excel_url = ""
         if rule.send_excel and rows:
             excel_url = build_excel(db, rule, rows, columns, result)
             if excel_url:
                 body += f"\n\n📎 **数据文件**：[点击下载]({excel_url})"
 
+        card_cfg = load_card_config(rule)
+        # 卡片没配按钮但这次生成了 Excel，就拿下载地址当按钮，省得用户再填一遍
+        if not (card_cfg.get("btn_url") or "") and excel_url:
+            card_cfg["btn_title"] = card_cfg.get("btn_title") or "下载完整数据"
+            card_cfg["btn_url"] = excel_url
+
+        msg_type = (rule.msg_type or "markdown").lower()
         errors: list[str] = []
         ok_count = 0
         for bot in bots:
             webhook = decrypt(bot.webhook_enc)
             secret = decrypt(bot.secret_enc)
-            if rule.msg_type == "text" and not image_url:
-                send_result = dingtalk.send_text(
-                    webhook, secret, body, mobiles, bool(at_config.get("at_all"))
+            at_all = bool(at_config.get("at_all"))
+            if msg_type == "text" and not image_url:
+                send_result = dingtalk.send_text(webhook, secret, body, mobiles, at_all)
+            elif msg_type == "actioncard":
+                send_result = dingtalk.send_action_card(
+                    webhook,
+                    secret,
+                    card_cfg.get("title") or title,
+                    body,
+                    mobiles,
+                    at_all,
+                    btn_title=card_cfg.get("btn_title") or "",
+                    btn_url=card_cfg.get("btn_url") or "",
+                    btn_orientation=str(card_cfg.get("btn_orientation") or "0"),
                 )
             else:
-                send_result = dingtalk.send_markdown(
-                    webhook, secret, title, body, mobiles, bool(at_config.get("at_all"))
-                )
+                send_result = dingtalk.send_markdown(webhook, secret, title, body, mobiles, at_all)
             if send_result.ok:
                 ok_count += 1
             else:

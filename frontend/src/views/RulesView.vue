@@ -20,6 +20,14 @@
                 <el-tag v-if="row.image && row.image.enabled" size="small" type="warning" effect="plain">
                   图片
                 </el-tag>
+                <el-tag
+                  v-else-if="(row.msg_type || '').toLowerCase() === 'actioncard'"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                >
+                  卡片
+                </el-tag>
               </div>
               <div class="rule-sub">{{ row.table_name }}</div>
             </template>

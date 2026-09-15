@@ -82,6 +82,39 @@ def send_text(
     return _post(webhook, secret, payload)
 
 
+def send_action_card(
+    webhook: str,
+    secret: str,
+    title: str,
+    text: str,
+    at_mobiles: list[str] | None = None,
+    at_all: bool = False,
+    btn_title: str = "",
+    btn_url: str = "",
+    btn_orientation: str = "0",
+) -> SendResult:
+    """ActionCard：正文同样是 markdown，外面套一层带标题栏的卡片，还能挂一个按钮。
+
+    钉钉的 actionCard 要求 text 里有 @手机号 才会真正高亮，所以同样走 append_mentions。
+    """
+    mobiles = [m for m in (at_mobiles or []) if m]
+    card = {
+        "title": title,
+        "text": append_mentions(text, mobiles, at_all),
+        "btnOrientation": btn_orientation or "0",
+    }
+    # 钉钉规定按钮标题和链接必须成对出现，只填一半等于没有按钮
+    if btn_title and btn_url:
+        card["singleTitle"] = btn_title
+        card["singleURL"] = btn_url
+    payload = {
+        "msgtype": "actionCard",
+        "actionCard": card,
+        "at": {"atMobiles": mobiles, "isAtAll": bool(at_all)},
+    }
+    return _post(webhook, secret, payload)
+
+
 def _post(webhook: str, secret: str, payload: dict) -> SendResult:
     if not webhook:
         return SendResult(ok=False, message="未配置 Webhook 地址")
@@ -96,4 +129,3 @@ def _post(webhook: str, secret: str, payload: dict) -> SendResult:
     if data.get("errcode") == 0:
         return SendResult(ok=True, message="发送成功", raw=data)
     return SendResult(ok=False, message=f"errcode={data.get('errcode')} {data.get('errmsg')}", raw=data)
-

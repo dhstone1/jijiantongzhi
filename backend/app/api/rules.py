@@ -53,6 +53,7 @@ def _to_dict(rule: PushRule) -> dict:
         "bot_ids": _loads(rule.bot_ids_json, []),
         "at_config": _loads(rule.at_json, {}),
         "image": _loads(rule.image_json, {}),
+        "card": _loads(rule.card_json, {}),
         "schedule_type": rule.schedule_type,
         "schedule": _loads(rule.schedule_json, {}),
         "enabled": rule.enabled,
@@ -110,6 +111,7 @@ def create_rule(payload: RuleIn, mobile: str = Query(""), db: Session = Depends(
         bot_ids_json=json.dumps(payload.bot_ids),
         at_json=json.dumps(payload.at_config, ensure_ascii=False),
         image_json=json.dumps(payload.image, ensure_ascii=False),
+        card_json=json.dumps(payload.card, ensure_ascii=False),
         schedule_type=payload.schedule_type,
         schedule_json=json.dumps(payload.schedule, ensure_ascii=False),
         enabled=payload.enabled,
@@ -143,6 +145,7 @@ def update_rule(rule_id: int, payload: RuleIn, mobile: str = Query(""), db: Sess
     rule.bot_ids_json = json.dumps(payload.bot_ids)
     rule.at_json = json.dumps(payload.at_config, ensure_ascii=False)
     rule.image_json = json.dumps(payload.image, ensure_ascii=False)
+    rule.card_json = json.dumps(payload.card, ensure_ascii=False)
     rule.schedule_type = payload.schedule_type
     rule.schedule_json = json.dumps(payload.schedule, ensure_ascii=False)
     rule.enabled = payload.enabled

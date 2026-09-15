@@ -75,13 +75,14 @@
               </el-select>
               <div class="hint">{{ tableStyleHint }}</div>
             </div>
-            <div v-if="pushStyle === 'table'" class="field">
+            <div class="field">
               <label>发送方式</label>
               <el-radio-group v-model="form.msg_type">
                 <el-radio-button value="markdown">Markdown</el-radio-button>
-                <el-radio-button value="text">纯文本</el-radio-button>
+                <el-radio-button value="actionCard">ActionCard</el-radio-button>
+                <el-radio-button value="text" :disabled="pushStyle === 'image'">纯文本</el-radio-button>
               </el-radio-group>
-              <div class="hint">纯文本消息不解析 Markdown，表格会自动换成纯文本对齐。</div>
+              <div class="hint">{{ msgTypeHint }}</div>
             </div>
             <div class="field">
               <label>发送Excel</label>
@@ -506,6 +507,41 @@
             </div>
           </div>
         </section>
+        <section v-if="isActionCard" class="panel">
+          <div class="panel-head">
+            <div class="panel-title">卡片设置</div>
+            <span class="muted">ActionCard 把消息装进一张带标题栏的卡片</span>
+          </div>
+          <div class="panel-body form-grid">
+            <div class="field">
+              <label>卡片标题</label>
+              <el-input v-model="form.card.title" :placeholder="form.name || '默认用规则名称'" />
+            </div>
+            <div class="field">
+              <label>按钮文字</label>
+              <el-input v-model="form.card.btn_title" placeholder="留空就没有按钮，例如：查看完整报表" />
+            </div>
+            <div class="field">
+              <label>按钮链接</label>
+              <el-input
+                v-model="form.card.btn_url"
+                placeholder="https://…；留空且开了「发送Excel」时自动用下载地址"
+              />
+            </div>
+            <div class="field">
+              <label>按钮排列</label>
+              <el-radio-group v-model="form.card.btn_orientation">
+                <el-radio-button value="0">竖排</el-radio-button>
+                <el-radio-button value="1">横排</el-radio-button>
+              </el-radio-group>
+            </div>
+            <div class="field span-2 hint">
+              钉钉的 ActionCard 正文和 Markdown 消息共用同一套渲染，表格能不能显示成表格仍然看客户端；
+              卡片的好处是标题栏更醒目、还能挂一个跳转按钮。按钮文字和链接要一起填，只填一半等于没有按钮。
+            </div>
+          </div>
+        </section>
+
         <section class="panel">
           <div class="panel-head">
             <div class="panel-title">消息内容</div>
@@ -751,6 +787,9 @@
         <div class="preview-card">
           <div class="preview-head"><span>钉钉消息效果</span></div>
           <div class="preview-body">
+            <div v-if="isActionCard" class="hint" style="margin-bottom: 8px">
+              {{ cardPreviewText }}
+            </div>
             <pre v-if="preview.rendered" class="message-preview">{{ preview.rendered }}</pre>
             <div v-else class="empty">填写模板后刷新预览</div>
           </div>
@@ -1088,6 +1127,7 @@ const form = reactive({
   template: '',
   msg_type: 'markdown',
   image: { enabled: false, title: '', subtitle: '', max_rows: 30, with_text: true },
+  card: { title: '', btn_title: '', btn_url: '', btn_orientation: '0' },
   bot_ids: [],
   at_config: {
     mode: 'none',
@@ -1121,8 +1161,8 @@ const pushStyle = computed({
   get: () => (form.image.enabled ? 'image' : 'table'),
   set(value) {
     form.image.enabled = value === 'image'
-    // 图片消息在钉钉里只能走 markdown，切过去时顺手把发送方式锁上
-    if (form.image.enabled) form.msg_type = 'markdown'
+    // 纯文本消息塞不下图片，切到图片时把纯文本兜掉
+    if (form.image.enabled && form.msg_type === 'text') form.msg_type = 'markdown'
   },
 })
 
@@ -1143,6 +1183,27 @@ const tableStyleHint = computed(() => {
   if (form.query.table_style === 'plain') return '靠空格对齐，钉钉压掉连续空格时列会错位。'
   if (form.query.table_style === 'md') return '标准 Markdown 表格语法，钉钉客户端不一定支持。'
   return '在钉钉里按等宽显示，列一定对齐；代码块内不显示标红。'
+})
+
+const isActionCard = computed(() => form.msg_type === 'actionCard')
+
+const cardPreviewText = computed(() => {
+  const title = form.card.title || form.name || '规则名称'
+  const hasButton = Boolean(form.card.btn_title && form.card.btn_url)
+  const button = hasButton
+    ? `按钮「${form.card.btn_title}」→ ${form.card.btn_url}`
+    : '没有按钮'
+  return `ActionCard 卡片标题：${title} · ${button}`
+})
+
+const msgTypeHint = computed(() => {
+  if (form.msg_type === 'text') return '纯文本消息不解析 Markdown，表格会自动换成纯文本对齐。'
+  if (form.msg_type === 'actionCard') {
+    return pushStyle.value === 'image'
+      ? '图片放进卡片里发，卡片上还能挂一个按钮。'
+      : '消息装进带标题栏的卡片，正文同样是 Markdown，还能挂一个按钮。'
+  }
+  return pushStyle.value === 'image' ? '图片以 Markdown 图片链接的形式发送。' : '普通的 Markdown 消息。'
 })
 
 const availableColumns = computed(() =>
@@ -1305,6 +1366,13 @@ async function loadRule(id) {
     with_text: true,
     ...(rule.image || {}),
   }
+  form.card = {
+    title: '',
+    btn_title: '',
+    btn_url: '',
+    btn_orientation: '0',
+    ...(rule.card || {}),
+  }
   form.bot_ids = rule.bot_ids || []
   form.at_config = {
     mode: 'none',
@@ -1413,7 +1481,8 @@ function insertToken(token) {
 watch(
   () => form.image.enabled,
   (value) => {
-    if (value) form.msg_type = 'markdown'
+    // 纯文本消息塞不下图片，开了图片就不能停在纯文本上；ActionCard 允许带图
+    if (value && form.msg_type === 'text') form.msg_type = 'markdown'
   },
   { immediate: true },
 )
@@ -1531,6 +1600,7 @@ async function save() {
     template: form.template,
     msg_type: form.msg_type,
     image: { ...form.image, max_rows: Number(form.image.max_rows) || 30 },
+    card: { ...form.card },
     bot_ids: form.bot_ids,
     at_config: atConfig,
     schedule_type: form.schedule_type,

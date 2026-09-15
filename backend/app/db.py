@@ -35,6 +35,7 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "send_excel": "BOOLEAN DEFAULT 0",
         "last_fired_at": "TIMESTAMP",
         "image_json": "TEXT DEFAULT '{}'",
+        "card_json": "TEXT DEFAULT '{}'",
     },
 }
 

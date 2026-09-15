@@ -62,6 +62,8 @@ class RuleIn(BaseModel):
     at_config: dict[str, Any] = Field(default_factory=dict)
     # 图片推送：{enabled, title, subtitle, max_rows, with_text, footer}
     image: dict[str, Any] = Field(default_factory=dict)
+    # ActionCard 卡片：{title, btn_title, btn_url, btn_orientation}
+    card: dict[str, Any] = Field(default_factory=dict)
     schedule_type: str = "manual"
     schedule: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
