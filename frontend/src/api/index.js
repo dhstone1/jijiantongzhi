@@ -32,6 +32,12 @@ function withMe(params = {}) {
   return { mobile: currentMobile(), ...params }
 }
 
+// 模板下载要走浏览器原生下载，用 axios 反而拿不到 Content-Disposition 里的文件名
+export function downloadTemplate(kind) {
+  const params = new URLSearchParams({ mobile: currentMobile() })
+  window.location.href = `/api/templates/${kind}?${params.toString()}`
+}
+
 export const api = {
   // 身份
   login: (mobile) => http.post('/session/login', { mobile }),
@@ -51,7 +57,12 @@ export const api = {
   importStaff: (file) => {
     const form = new FormData()
     form.append('file', file)
-    return http.post('/staff/import', form)
+    return http.post('/staff/import', form, { params: withMe() })
+  },
+  importRegions: (file) => {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post('/regions/import', form, { params: withMe() })
   },
 
   // 钉钉

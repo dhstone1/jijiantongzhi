@@ -8,9 +8,12 @@
         </p>
       </div>
       <div class="head-actions">
+        <el-button @click="downloadTemplate('staff')">
+          <el-icon><Download /></el-icon> 下载模板
+        </el-button>
         <el-upload :auto-upload="false" :show-file-list="false" accept=".xlsx,.xlsm,.csv" :on-change="handleImport">
           <el-button :loading="importing">
-            <el-icon><Upload /></el-icon> 从 Excel 导入
+            <el-icon><Upload /></el-icon> 按模板导入
           </el-button>
         </el-upload>
         <el-button type="primary" @click="openDialog()">
@@ -24,7 +27,7 @@
       :closable="false"
       show-icon
       title="Excel 导入格式"
-      description="第一行为表头，需要包含「姓名」和「手机号」两列，可选「归属地」「岗位」。归属地会自动按字典归一化，识别不了的会在导入结果里提示。"
+      description="点「下载模板」拿到标准格式，里面第二个工作表写了每列怎么填、第三个工作表列出当前可用的归属地。至少要填「姓名」和「手机号」；归属地匹配不上的、越权的会单独列出来，不会静默丢掉。"
       style="margin-bottom: 16px"
     />
 
@@ -117,7 +120,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api } from '../api'
+import { api, downloadTemplate } from '../api'
 import { ROLE_CITY, ROLE_OPTIONS, ROLE_PROVINCE, ROLE_USER, useUserStore } from '../stores/user'
 
 const store = useUserStore()
@@ -217,6 +220,9 @@ async function handleImport(uploadFile) {
       message += `；未识别归属地：${result.unknown_regions.join('、')}`
     }
     ElMessage.success(message)
+    if (result.skipped?.length) {
+      ElMessageBox.alert(result.skipped.join('\n'), '这些没导进去', { type: 'warning' })
+    }
     load()
   } finally {
     importing.value = false

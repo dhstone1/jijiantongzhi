@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import or_, select
+from fastapi.responses import Response
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import IMAGE_DIR, IMAGE_URL_PREFIX, SERVER_PORT
@@ -14,11 +16,23 @@ from ..db import get_db
 from ..models import DingTalkBot, Region, ResourcePermission, Staff
 from ..schemas import BotIn, LoginIn, RegionIn, SettingsIn, StaffIn, PermissionGrantIn
 from ..security import decrypt, encrypt, mask
-from ..services import dingtalk, image_store
+from ..services import dingtalk, image_store, import_templates
 from ..services import scope
 from ..services.region_norm import DEFAULT_REGIONS, PARENT_CITY, RegionNormalizer
 
 router = APIRouter()
+
+
+def _xlsx_response(content: bytes, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            # 中文文件名要走 filename*，否则浏览器下来的名字是乱码
+            "Content-Disposition": "attachment; filename=template.xlsx; filename*=UTF-8''%s"
+            % quote(filename),
+        },
+    )
 
 
 def _resolve_caller(db: Session, mobile: str) -> Staff | None:
@@ -54,6 +68,37 @@ def login(payload: LoginIn, db: Session = Depends(get_db)):
 
 
 # ---------------------------------------------------------------- 归属地字典
+
+def _scope_options(db: Session, caller: Staff | None) -> list[str]:
+    """模板「可选值」那一页列什么。按调用者的作用域给，免得填了导不进去。"""
+    items = db.query(Region).filter(Region.is_active.is_(True)).order_by(Region.sort_order).all()
+    if caller is not None and not scope.is_province(caller.role):
+        allowed = scope.caller_scope(db, caller.role, caller.region_name) or set()
+        items = [item for item in items if item.standard_name in allowed]
+    return [item.standard_name for item in items]
+
+
+@router.get("/templates/{kind}")
+def download_template(kind: str, mobile: str = Query(""), db: Session = Depends(get_db)):
+    """下载导入模板：kind 取 regions（归属地字典）或 staff（人员信息）。"""
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller), action="下载导入模板")
+    options = _scope_options(db, caller)
+
+    if kind in ("regions", "region"):
+        # 示例行跟着当前作用域走：地市管理员看到的是自己市下面的区县
+        parent = caller.region_name if (caller and not scope.is_province(caller.role)) else scope.PROVINCE_REGION
+        content = import_templates.build_regions_template(options, parent=parent)
+        return _xlsx_response(content, "归属地字典导入模板.xlsx")
+
+    if kind in ("staff", "people"):
+        content = import_templates.build_staff_template(
+            options, region=caller.region_name if caller is not None else ""
+        )
+        return _xlsx_response(content, "人员信息导入模板.xlsx")
+
+    raise HTTPException(status_code=404, detail="没有这种模板")
+
 
 @router.get("/regions")
 def list_regions(mobile: str = Query(""), db: Session = Depends(get_db)):
@@ -142,6 +187,108 @@ def delete_region(region_id: int, mobile: str = Query(""), db: Session = Depends
     return {"ok": True}
 
 
+@router.post("/regions/import")
+async def import_regions(
+    file: UploadFile = File(...),
+    mobile: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """按「归属地字典导入模板」批量导入/更新归属地。
+
+    认这些列（顺序无所谓，列名带关键字即可）：标准名、简称、上级归属地、级别、别名、排序。
+    """
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller))
+
+    df, header = _read_table(file)
+    cols = _map_columns(header, {
+        "standard": ("标准名", "归属地", "名称"),
+        "short": ("简称", "短名"),
+        "parent": ("上级", "父级"),
+        "level": ("级别", "层级"),
+        "aliases": ("别名", "其他写法"),
+        "sort": ("排序", "顺序"),
+    })
+    if not cols.get("standard"):
+        raise HTTPException(
+            status_code=400,
+            detail="没找到「标准名」列，请用「归属地字典」页面下载的模板填写",
+        )
+
+    caller_role = _caller_role(caller)
+    allowed = scope.caller_scope(db, caller_role, _caller_region(caller))
+    is_province = scope.is_province(caller_role)
+
+    created = 0
+    updated = 0
+    skipped: list[str] = []
+
+    for _, row in df.iterrows():
+        standard = str(row.get(cols["standard"], "")).strip()
+        if not standard:
+            continue
+        if standard == import_templates.EXAMPLE_REGION_NAME:
+            # 模板自带的示例行，不用用户手动删
+            continue
+        if not is_province and standard in scope.PROTECTED_REGIONS:
+            skipped.append(f"{standard}（不由本地市维护）")
+            continue
+
+        parent = str(row.get(cols.get("parent", ""), "")).strip() if cols.get("parent") else ""
+        if not is_province and parent and parent not in (allowed or set()):
+            skipped.append(f"{standard}（上级「{parent}」不在本地市范围内）")
+            continue
+
+        level = str(row.get(cols.get("level", ""), "")).strip() if cols.get("level") else ""
+        if level and level not in ("省", "市", "区县"):
+            level = ""
+        if not level:
+            level = "市" if parent in ("", scope.PROVINCE_REGION) else "区县"
+
+        sort_raw = str(row.get(cols.get("sort", ""), "")).strip() if cols.get("sort") else ""
+        try:
+            sort_order = int(float(sort_raw))
+        except (TypeError, ValueError):
+            sort_order = None
+
+        aliases = import_templates.split_aliases(
+            str(row.get(cols.get("aliases", ""), "")) if cols.get("aliases") else ""
+        )
+        short = str(row.get(cols.get("short", ""), "")).strip() if cols.get("short") else ""
+
+        item = db.query(Region).filter(Region.standard_name == standard).first()
+        if item is None:
+            if sort_order is None:
+                sort_order = (db.query(func.max(Region.sort_order)).scalar() or 0) + 1
+            db.add(
+                Region(
+                    standard_name=standard,
+                    short_name=short,
+                    parent=parent,
+                    level=level,
+                    aliases_json=json.dumps(aliases, ensure_ascii=False),
+                    sort_order=sort_order,
+                )
+            )
+            created += 1
+            if not is_province:
+                # 新建之后要立刻纳入作用域，否则同一份文件里它的下级会被判成越权
+                allowed = (allowed or set()) | {standard}
+            continue
+
+        item.short_name = short or item.short_name
+        if parent:
+            item.parent = parent
+        item.level = level
+        item.aliases_json = json.dumps(aliases, ensure_ascii=False)
+        if sort_order is not None:
+            item.sort_order = sort_order
+        updated += 1
+
+    db.commit()
+    return {"created": created, "updated": updated, "skipped": skipped, "columns": header}
+
+
 @router.post("/regions/check")
 def check_regions(payload: dict, db: Session = Depends(get_db)):
     """把一批名称做归一化，用来排查报表里的脏数据。"""
@@ -182,6 +329,36 @@ def _caller_role(caller: Staff | None) -> str | None:
     return scope.normalize_role(caller.role) if caller is not None else None
 
 
+def _read_table(file: UploadFile) -> tuple["object", list[str]]:
+    """把上传的 xlsx / csv 读成 DataFrame，返回 (df, 表头)。"""
+    import pandas as pd
+
+    suffix = Path(file.filename or "upload.xlsx").suffix.lower() or ".xlsx"
+    if suffix not in (".xlsx", ".xlsm", ".csv"):
+        raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv 文件")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+        handle.write(file.file.read())
+        temp_path = handle.name
+    try:
+        df = pd.read_excel(temp_path, dtype=str).fillna("")
+    except Exception as exc:  # noqa: BLE001 - 解析失败就当作用户填错
+        raise HTTPException(status_code=400, detail=f"读取文件失败：{exc}") from exc
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+    return df, [str(c).strip() for c in df.columns]
+
+
+def _map_columns(header: list[str], spec: dict[str, tuple[str, ...]]) -> dict[str, str]:
+    """把「这列其实是哪个字段」猜出来。列名里带关键字的算命中，顺序无所谓。"""
+    mapping: dict[str, str] = {}
+    for key, keywords in spec.items():
+        hit = next((c for c in header if any(k in c for k in keywords)), "")
+        if hit:
+            mapping[key] = hit
+    return mapping
+
+
 def _caller_region(caller: Staff | None) -> str:
     return (caller.region_name or "").strip() if caller is not None else ""
 
@@ -206,12 +383,12 @@ def _guard_staff_write(db, caller_role, caller_region, region_name, role) -> Non
         raise HTTPException(status_code=403, detail="省级管理员只能由省级设置")
 
 
-def _require_region_manager(caller_role: str | None) -> None:
+def _require_region_manager(caller_role: str | None, action: str = "修改这类配置") -> None:
     """归属地字典 / 钉钉群的写操作：省级和地市管理员才能动。"""
     if caller_role is None:
         return
     if not scope.can_manage_region(caller_role):
-        raise HTTPException(status_code=403, detail="普通人员不能修改这类配置")
+        raise HTTPException(status_code=403, detail=f"普通人员不能{action}")
 
 
 @router.get("/staff")
@@ -276,43 +453,54 @@ def delete_staff(staff_id: int, mobile: str = Query(""), db: Session = Depends(g
 
 
 @router.post("/staff/import")
-async def import_staff(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """从 Excel 批量导入/更新人员。要求列：姓名、手机号、归属地。"""
-    suffix = Path(file.filename or "staff.xlsx").suffix.lower() or ".xlsx"
-    if suffix not in (".xlsx", ".xlsm", ".csv"):
-        raise HTTPException(status_code=400, detail="请上传 .xlsx 或 .csv 文件")
+async def import_staff(
+    file: UploadFile = File(...),
+    mobile: str = Query(""),
+    db: Session = Depends(get_db),
+):
+    """按「人员信息导入模板」批量导入/更新人员。
 
-    import pandas as pd
+    认这些列（顺序无所谓）：姓名、手机号、归属地、角色、岗位、接收告警。
+    手机号已存在的按新内容覆盖更新。
+    """
+    caller = _resolve_caller(db, mobile)
+    _require_region_manager(_caller_role(caller), action="导入文件")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-        handle.write(await file.read())
-        temp_path = handle.name
+    df, header = _read_table(file)
+    cols = _map_columns(header, {
+        "name": ("姓名", "名字"),
+        "mobile": ("手机", "电话"),
+        "region": ("归属", "区域", "地区"),
+        "role": ("角色", "身份"),
+        "position": ("岗位", "职位"),
+        "alert": ("接收告警", "接收提醒", "告警"),
+    })
+    if not cols.get("name") or not cols.get("mobile"):
+        raise HTTPException(
+            status_code=400,
+            detail="没找到「姓名」或「手机号」列，请用「人员信息」页面下载的模板填写",
+        )
 
-    try:
-        df = pd.read_excel(temp_path, dtype=str).fillna("")
-    except Exception as exc:
-        Path(temp_path).unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"读取文件失败：{exc}") from exc
-
-    header = list(df.columns)
-    name_col = next((c for c in header if "姓名" in c), header[0] if header else "")
-    mobile_col = next((c for c in header if "手机" in c or "电话" in c), header[1] if len(header) > 1 else "")
-    region_col = next((c for c in header if "归属" in c or "区域" in c or "地区" in c), header[2] if len(header) > 2 else "")
-    role_col = next((c for c in header if "角色" in c), None)
-    position_col = next((c for c in header if "职位" in c or "岗位" in c), None)
+    # 角色列可能写中文，也可能写 province_admin 这种英文
+    role_words = {"省级管理员": scope.ROLE_PROVINCE, "地市管理员": scope.ROLE_CITY, "普通人员": scope.ROLE_USER}
 
     normalizer = RegionNormalizer.from_db(db)
+    caller_role = _caller_role(caller)
     created = 0
     updated = 0
     unknown_regions: set[str] = set()
+    skipped: list[str] = []
 
     for _, row in df.iterrows():
-        name = str(row.get(name_col, "")).strip()
-        mobile = str(row.get(mobile_col, "")).strip()
-        region_raw = str(row.get(region_col, "")).strip()
-        if not name or not mobile:
+        name = str(row.get(cols["name"], "")).strip()
+        mobile_value = str(row.get(cols["mobile"], "")).strip()
+        if not name or not mobile_value:
+            continue
+        if name == import_templates.EXAMPLE_STAFF_NAME:
+            # 模板自带的示例行，不用用户手动删
             continue
 
+        region_raw = str(row.get(cols.get("region", ""), "")).strip() if cols.get("region") else ""
         region_name = ""
         if region_raw:
             outcome = normalizer.normalize(region_raw)
@@ -320,21 +508,40 @@ async def import_staff(file: UploadFile = File(...), db: Session = Depends(get_d
                 region_name = outcome.standard
             else:
                 unknown_regions.add(region_raw)
+                continue
+
+        role_raw = str(row.get(cols.get("role", ""), "")).strip() if cols.get("role") else ""
+        role = role_words.get(role_raw) or scope.normalize_role(role_raw)
+        alert_raw = str(row.get(cols.get("alert", ""), "")) if cols.get("alert") else ""
 
         kwargs = {
             "name": name,
             "region_name": region_name,
-            "role": str(row.get(role_col, "user")).strip() if role_col else "user",
-            "position": str(row.get(position_col, "")).strip() if position_col else "",
+            "role": role,
+            "position": str(row.get(cols.get("position", ""), "")).strip() if cols.get("position") else "",
+            "receive_alert": import_templates.truthy(alert_raw, default=True),
         }
 
-        existing = db.query(Staff).filter(Staff.mobile == mobile).first()
+        try:
+            # 作用域和角色越权在导入时同样要拦，不能绕过接口直接刷库
+            _guard_staff_write(
+                db,
+                caller_role,
+                _caller_region(caller),
+                kwargs["region_name"],
+                kwargs["role"],
+            )
+        except HTTPException as exc:
+            skipped.append(f"{name}（{exc.detail}）")
+            continue
+
+        existing = db.query(Staff).filter(Staff.mobile == mobile_value).first()
         if existing:
             for k, v in kwargs.items():
                 setattr(existing, k, v)
             updated += 1
         else:
-            db.add(Staff(mobile=mobile, **kwargs))
+            db.add(Staff(mobile=mobile_value, **kwargs))
             created += 1
 
     db.commit()
@@ -342,6 +549,7 @@ async def import_staff(file: UploadFile = File(...), db: Session = Depends(get_d
         "created": created,
         "updated": updated,
         "unknown_regions": sorted(unknown_regions),
+        "skipped": skipped,
         "columns": header,
     }
 
