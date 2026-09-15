@@ -9,8 +9,11 @@
   {{行数}} {{总数}}   数据行数（英文 count / rows 也可以）
   {{日期}} {{时间}}   渲染时刻（英文 date / time 也可以）
 
-注意：钉钉自定义机器人的 markdown 不支持 GFM 表格，
-因此 {{表格}} 输出的是按显示宽度对齐的文本块，在钉钉里看起来仍然整齐。
+表格有三种呈现方式，规则里用「表格样式」选：
+
+  code   包在代码块里的对齐文本，钉钉里按等宽显示，列一定对齐（默认）
+  plain  按显示宽度对齐的纯文本，纯文本消息只能用这种
+  md     GFM 表格语法 | a | b |，客户端不认时看到的是一行竖线
 """
 from __future__ import annotations
 
@@ -22,6 +25,9 @@ PLACEHOLDER = re.compile(r"\{\{\s*([^#/{}][^{}]*?)\s*\}\}")
 EACH_BLOCK = re.compile(r"\{\{#each\}\}(.*?)\{\{/each\}\}", re.S)
 
 BUILTIN_KEYS = {"行数", "日期", "时间", "表格", "列表"}
+
+# {{表格}} 的呈现方式（规则 query.table_style）
+TABLE_STYLES = ("code", "plain", "md")
 
 # 运营人员偶尔会写成英文，这里做一层等价映射，避免模板报「字段不存在」
 KEY_ALIASES = {
@@ -80,11 +86,13 @@ def render_template(
     highlight: dict | None = None,
     now: datetime | None = None,
     suppress_table: bool = False,
+    table_style: str = "code",
 ) -> tuple[str, list[str]]:
     """渲染模板，返回 (文本, 告警列表)。
 
     suppress_table=True 时 {{表格}} / {{列表}} 渲染成空，用于「图片里已经有表格了，
     文字部分就不要再重复发一遍数据」的场景。
+    table_style 决定 {{表格}} 长什么样，取值见 TABLE_STYLES。
     """
     now = now or datetime.now()
     warnings: list[str] = []
@@ -97,7 +105,7 @@ def render_template(
             "行数": str(len(rows)),
             "日期": now.strftime("%Y-%m-%d"),
             "时间": now.strftime("%H:%M"),
-            "表格": "" if suppress_table else render_aligned_table(rows, columns, highlight),
+            "表格": "" if suppress_table else render_table(rows, columns, highlight, table_style),
             "列表": "" if suppress_table else render_list(rows, columns),
             "__row__": data,
         }
@@ -147,7 +155,13 @@ def render_template(
     return rendered.strip(), sorted(set(warnings))
 
 
-def _highlight_cell(value: str, column: str, row: dict, highlight: dict | None) -> str:
+def _highlight_cell(
+    value: str,
+    column: str,
+    row: dict,
+    highlight: dict | None,
+    allow_html: bool = True,
+) -> str:
     if not highlight:
         return value
     if highlight.get("field") not in (None, "", column):
@@ -167,6 +181,9 @@ def _highlight_cell(value: str, column: str, row: dict, highlight: dict | None) 
     }.get(op, False)
     if not hit:
         return value
+    if not allow_html:
+        # 代码块里 HTML 标签不会渲染，只会原样显示成源码，所以不加
+        return value
     color = highlight.get("color") or "#FF0000"
     return f'<font color="{color}">{value}</font>'
 
@@ -175,6 +192,7 @@ def render_aligned_table(
     rows: list[dict],
     columns: list[str],
     highlight: dict | None = None,
+    allow_html: bool = True,
 ) -> str:
     if not rows or not columns:
         return "（无数据）"
@@ -196,9 +214,66 @@ def render_aligned_table(
         for index, value in enumerate(values):
             if display_width(value) > widths[index]:
                 value = value[: widths[index] - 1] + "…"
-            cells.append(_highlight_cell(pad(value, widths[index]), columns[index], row, highlight))
+            cells.append(
+                _highlight_cell(
+                    pad(value, widths[index]), columns[index], row, highlight, allow_html
+                )
+            )
         lines.append("  ".join(cells))
     return "\n".join(lines)
+
+
+def _escape_cell(text: str) -> str:
+    """Markdown 表格里的竖线和换行会撑破单元格，先转义掉。"""
+    return str(text).replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def render_markdown_table(
+    rows: list[dict],
+    columns: list[str],
+    highlight: dict | None = None,
+) -> str:
+    """GFM 表格语法，能不能渲染成表格取决于钉钉客户端。"""
+    if not rows or not columns:
+        return "（无数据）"
+
+    header = [_escape_cell(str(column)) or " " for column in columns]
+    lines = ["| " + " | ".join(header) + " |"]
+    lines.append("| " + " | ".join("---" for _ in header) + " |")
+    for row in rows:
+        cells = []
+        for column in columns:
+            text = _escape_cell(_value(row, column)) or " "
+            cells.append(_highlight_cell(text, column, row, highlight))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def render_table(
+    rows: list[dict],
+    columns: list[str],
+    highlight: dict | None = None,
+    style: str = "code",
+) -> str:
+    """按 table_style 渲染数据表格，取值见 TABLE_STYLES。"""
+    style = str(style or "code").lower()
+    if style not in TABLE_STYLES:
+        style = "code"
+    if style == "md":
+        return render_markdown_table(rows, columns, highlight)
+    if style == "plain":
+        return render_aligned_table(rows, columns, highlight)
+    # code：钉钉里等宽显示，列一定对齐；代码块内 HTML 不生效，标红要去掉
+    body = render_aligned_table(rows, columns, highlight, allow_html=False)
+    return f"```\n{body}\n```"
+
+
+def resolve_table_style(msg_type: str, query_cfg: dict | None) -> str:
+    """纯文本消息不做 markdown 渲染，代码块和表格语法都会原样显示，只能退化成对齐文本。"""
+    if str(msg_type or "markdown").lower() == "text":
+        return "plain"
+    style = str((query_cfg or {}).get("table_style") or "code").lower()
+    return style if style in TABLE_STYLES else "code"
 
 
 def render_list(rows: list[dict], columns: list[str]) -> str:
@@ -224,4 +299,3 @@ def default_template(title: str, columns: list[str], time_field: str = "") -> st
 
 def columns_from_rows(rows: list[dict]) -> list[str]:
     return list(rows[0].keys()) if rows else []
-

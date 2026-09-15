@@ -56,19 +56,32 @@
               <div class="hint">非管理员只能看到自己归属地的规则。</div>
             </div>
             <div class="field">
+              <label>推送形式</label>
+              <el-radio-group v-model="pushStyle">
+                <el-radio-button value="table">数据表格</el-radio-button>
+                <el-radio-button value="image">报表图片</el-radio-button>
+              </el-radio-group>
+              <div class="hint">{{ pushStyleHint }}</div>
+            </div>
+            <div v-if="pushStyle === 'table'" class="field">
+              <label>表格样式</label>
+              <el-select v-model="form.query.table_style" style="width: 100%">
+                <el-option
+                  v-for="style in tableStyles"
+                  :key="style.value"
+                  :label="style.label"
+                  :value="style.value"
+                />
+              </el-select>
+              <div class="hint">{{ tableStyleHint }}</div>
+            </div>
+            <div v-if="pushStyle === 'table'" class="field">
               <label>发送方式</label>
-              <el-radio-group v-model="form.msg_type" :disabled="form.image.enabled">
+              <el-radio-group v-model="form.msg_type">
                 <el-radio-button value="markdown">Markdown</el-radio-button>
                 <el-radio-button value="text">纯文本</el-radio-button>
               </el-radio-group>
-              <div v-if="form.image.enabled" class="hint">
-                图片只能走 Markdown（钉钉限制），已经自动锁定。
-              </div>
-            </div>
-            <div class="field">
-              <label>图片发送</label>
-              <el-switch v-model="form.image.enabled" active-text="以图片形式发送报表" />
-              <div class="hint">把结果画成一张图发到群里，手机上不用左右滑动。</div>
+              <div class="hint">纯文本消息不解析 Markdown，表格会自动换成纯文本对齐。</div>
             </div>
             <div class="field">
               <label>发送Excel</label>
@@ -514,7 +527,7 @@
             <div class="hint">
               可用占位符：{{ help.field }} 取第一行的值、{{ help.table }} 渲染全部数据、
               {{ help.list }} 每行一条、{{ help.count }} 行数、{{ help.date }}、{{ help.time }}。
-              钉钉 markdown 不支持表格，所以 {{ help.table }} 输出的是按列对齐的文本，在钉钉里显示依然整齐。
+              {{ help.table }} 长什么样由上面的「表格样式」决定；选了「报表图片」时，数据表只出现在图片里。
             </div>
           </div>
         </section>
@@ -1060,6 +1073,7 @@ function emptyQuery() {
     empty_action: 'skip',
     highlight: { field: '', op: '>', value: 0 },
     trigger: emptyTrigger(),
+    table_style: 'code',
   }
 }
 
@@ -1100,6 +1114,35 @@ const dailyTime = computed({
     form.schedule.hour = Number(parts[0])
     form.schedule.minute = Number(parts[1])
   },
+})
+
+// 「推送形式」是界面上的说法，存到规则里就是 image.enabled
+const pushStyle = computed({
+  get: () => (form.image.enabled ? 'image' : 'table'),
+  set(value) {
+    form.image.enabled = value === 'image'
+    // 图片消息在钉钉里只能走 markdown，切过去时顺手把发送方式锁上
+    if (form.image.enabled) form.msg_type = 'markdown'
+  },
+})
+
+const tableStyles = [
+  { value: 'code', label: '代码块表格（钉钉里列一定对齐，推荐）' },
+  { value: 'plain', label: '纯文本对齐（靠空格对齐，手机上可能挤在一起）' },
+  { value: 'md', label: 'Markdown 表格语法（部分客户端不渲染）' },
+]
+
+const pushStyleHint = computed(() =>
+  pushStyle.value === 'image'
+    ? '把结果画成一张 PNG 发到群里，手机上不用左右滑动。'
+    : '把数据当成表格发到群里，一条消息里带完整的行列。',
+)
+
+const tableStyleHint = computed(() => {
+  if (form.msg_type === 'text') return '纯文本消息不做 Markdown 渲染，实际按纯文本对齐发送。'
+  if (form.query.table_style === 'plain') return '靠空格对齐，钉钉压掉连续空格时列会错位。'
+  if (form.query.table_style === 'md') return '标准 Markdown 表格语法，钉钉客户端不一定支持。'
+  return '在钉钉里按等宽显示，列一定对齐；代码块内不显示标红。'
 })
 
 const availableColumns = computed(() =>
@@ -1404,6 +1447,7 @@ async function runPreview() {
       region_field: form.region_field,
       region_name: form.region_name,
       template: form.template,
+      msg_type: form.msg_type,
       // 分组统计要在整批数据上算次数，取太少会让「出现 N 次」失真
       limit: Math.min(form.query.limit || 50, 500),
       image: { ...form.image, max_rows: Number(form.image.max_rows) || 30 },

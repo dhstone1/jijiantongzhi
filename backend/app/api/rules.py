@@ -276,6 +276,7 @@ def preview_rule(payload: PreviewIn, db: Session = Depends(get_db)):
                 columns,
                 highlight=cfg.get("highlight") or None,
                 suppress_table=suppress_table,
+                table_style=renderer.resolve_table_style(payload.msg_type, payload.query),
             )
         if suppress_table:
             render_warnings.append("已开启图片发送，文字部分只保留标题和说明，不再重复发数据表")

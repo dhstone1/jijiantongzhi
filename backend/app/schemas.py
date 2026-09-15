@@ -75,6 +75,8 @@ class PreviewIn(BaseModel):
     region_field: str = ""
     region_name: str = ""
     template: str = ""
+    # 纯文本消息不做 markdown 渲染，表格样式要跟着一起降级
+    msg_type: str = "markdown"
     limit: int = 50
     image: dict[str, Any] = Field(default_factory=dict)
     send_excel: bool = False

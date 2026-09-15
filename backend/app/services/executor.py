@@ -278,6 +278,7 @@ def run_rule(
             rows,
             columns,
             highlight=highlight,
+            table_style=renderer.resolve_table_style(rule.msg_type, query_cfg),
         )
         result["rendered"] = rendered
         result["warnings"].extend(render_warnings)
