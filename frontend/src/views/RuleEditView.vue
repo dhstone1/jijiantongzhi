@@ -63,18 +63,6 @@
               </el-radio-group>
               <div class="hint">{{ pushStyleHint }}</div>
             </div>
-            <div v-if="pushStyle === 'table'" class="field">
-              <label>表格样式</label>
-              <el-select v-model="form.query.table_style" style="width: 100%">
-                <el-option
-                  v-for="style in tableStyles"
-                  :key="style.value"
-                  :label="style.label"
-                  :value="style.value"
-                />
-              </el-select>
-              <div class="hint">{{ tableStyleHint }}</div>
-            </div>
             <div class="field">
               <label>发送方式</label>
               <el-radio-group v-model="form.msg_type">
@@ -563,7 +551,7 @@
             <div class="hint">
               可用占位符：{{ help.field }} 取第一行的值、{{ help.table }} 渲染全部数据、
               {{ help.list }} 每行一条、{{ help.count }} 行数、{{ help.date }}、{{ help.time }}。
-              {{ help.table }} 长什么样由上面的「表格样式」决定；选了「报表图片」时，数据表只出现在图片里。
+              {{ help.table }} 输出的是 Markdown 表格；选了「报表图片」时，数据表只出现在图片里。
             </div>
           </div>
         </section>
@@ -1112,7 +1100,6 @@ function emptyQuery() {
     empty_action: 'skip',
     highlight: { field: '', op: '>', value: 0 },
     trigger: emptyTrigger(),
-    table_style: 'code',
   }
 }
 
@@ -1166,24 +1153,11 @@ const pushStyle = computed({
   },
 })
 
-const tableStyles = [
-  { value: 'code', label: '代码块表格（钉钉里列一定对齐，推荐）' },
-  { value: 'plain', label: '纯文本对齐（靠空格对齐，手机上可能挤在一起）' },
-  { value: 'md', label: 'Markdown 表格语法（部分客户端不渲染）' },
-]
-
 const pushStyleHint = computed(() =>
   pushStyle.value === 'image'
     ? '把结果画成一张 PNG 发到群里，手机上不用左右滑动。'
     : '把数据当成表格发到群里，一条消息里带完整的行列。',
 )
-
-const tableStyleHint = computed(() => {
-  if (form.msg_type === 'text') return '纯文本消息不做 Markdown 渲染，实际按纯文本对齐发送。'
-  if (form.query.table_style === 'plain') return '靠空格对齐，钉钉压掉连续空格时列会错位。'
-  if (form.query.table_style === 'md') return '标准 Markdown 表格语法，钉钉客户端不一定支持。'
-  return '在钉钉里按等宽显示，列一定对齐；代码块内不显示标红。'
-})
 
 const isActionCard = computed(() => form.msg_type === 'actionCard')
 

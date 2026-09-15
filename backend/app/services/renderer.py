@@ -9,11 +9,11 @@
   {{行数}} {{总数}}   数据行数（英文 count / rows 也可以）
   {{日期}} {{时间}}   渲染时刻（英文 date / time 也可以）
 
-表格有三种呈现方式，规则里用「表格样式」选：
+表格有三种呈现方式，存在规则 query.table_style 里，默认 md（界面不出这个开关）：
 
-  code   包在代码块里的对齐文本，钉钉里按等宽显示，列一定对齐（默认）
+  md     GFM 表格语法 | a | b |（默认）
+  code   包在代码块里的对齐文本，钉钉里按等宽显示，列一定对齐
   plain  按显示宽度对齐的纯文本，纯文本消息只能用这种
-  md     GFM 表格语法 | a | b |，客户端不认时看到的是一行竖线
 """
 from __future__ import annotations
 
@@ -253,12 +253,12 @@ def render_table(
     rows: list[dict],
     columns: list[str],
     highlight: dict | None = None,
-    style: str = "code",
+    style: str = "md",
 ) -> str:
     """按 table_style 渲染数据表格，取值见 TABLE_STYLES。"""
-    style = str(style or "code").lower()
+    style = str(style or "md").lower()
     if style not in TABLE_STYLES:
-        style = "code"
+        style = "md"
     if style == "md":
         return render_markdown_table(rows, columns, highlight)
     if style == "plain":
@@ -272,8 +272,8 @@ def resolve_table_style(msg_type: str, query_cfg: dict | None) -> str:
     """纯文本消息不做 markdown 渲染，代码块和表格语法都会原样显示，只能退化成对齐文本。"""
     if str(msg_type or "markdown").lower() == "text":
         return "plain"
-    style = str((query_cfg or {}).get("table_style") or "code").lower()
-    return style if style in TABLE_STYLES else "code"
+    style = str((query_cfg or {}).get("table_style") or "md").lower()
+    return style if style in TABLE_STYLES else "md"
 
 
 def render_list(rows: list[dict], columns: list[str]) -> str:
