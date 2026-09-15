@@ -150,8 +150,18 @@
                     :key="name"
                     closable
                     class="chip"
+                    :class="{
+                      'chip-dragging': dragIndex === index,
+                      'chip-drop-target': dragOverIndex === index && dragIndex !== index,
+                    }"
+                    draggable="true"
+                    @dragstart="onChipDragStart(index, $event)"
+                    @dragover.prevent="onChipDragOver(index)"
+                    @drop.prevent="onChipDrop(index)"
+                    @dragend="clearDragState"
                     @close="removeField(name)"
                   >
+                    <el-icon class="chip-handle"><Rank /></el-icon>
                     <span class="chip-index">{{ index + 1 }}</span>{{ name }}
                     <el-icon class="chip-move" @click.stop="moveField(index, -1)"><Top /></el-icon>
                     <el-icon class="chip-move" @click.stop="moveField(index, 1)"><Bottom /></el-icon>
@@ -169,7 +179,7 @@
                   {{
                     form.query.group_by.length
                       ? '已开启分组汇总，这里显示的即分组字段，顺序即消息里的显示顺序。'
-                      : '点标签上的上下箭头可调整列顺序，顺序即消息里的显示顺序。'
+                      : '直接拖动标签调整列顺序（也可以用标签上的上下箭头），顺序即消息里的显示顺序。'
                   }}
                 </div>
               </template>
@@ -1411,16 +1421,50 @@ function removeField(name) {
 
 function moveField(index, offset) {
   const target = index + offset
+  reorderFields(index, target)
+}
+
+// 把 from 位置的字段挪到 to 位置；开了分组汇总时 group_by 跟着 select 的顺序走
+function reorderFields(from, to) {
   const list = form.query.select
-  if (target < 0 || target >= list.length) return
-  const tmp = list[index]
-  list[index] = list[target]
-  list[target] = tmp
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return
+  const [moved] = list.splice(from, 1)
+  list.splice(to, 0, moved)
   if (form.query.group_by.length) {
     const grouped = new Set(form.query.group_by)
     form.query.group_by = list.filter((name) => grouped.has(name))
   }
 }
+
+// 拖动排序用浏览器原生拖放，不额外引第三方库
+const dragIndex = ref(-1)
+const dragOverIndex = ref(-1)
+
+function clearDragState() {
+  dragIndex.value = -1
+  dragOverIndex.value = -1
+}
+
+function onChipDragStart(index, event) {
+  dragIndex.value = index
+  dragOverIndex.value = index
+  if (event && event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox 不往 dataTransfer 里塞点东西就不会触发 drop
+    event.dataTransfer.setData('text/plain', String(index))
+  }
+}
+
+function onChipDragOver(index) {
+  dragOverIndex.value = index
+}
+
+function onChipDrop(index) {
+  const from = dragIndex.value
+  clearDragState()
+  if (from >= 0) reorderFields(from, index)
+}
+
 
 function addFilter() {
   form.query.filters.push({ column: '', op: '=', value: '', logic: 'and' })
@@ -1689,6 +1733,27 @@ async function save() {
 .chip {
   height: 28px;
   padding: 0 6px 0 4px;
+  cursor: grab;
+}
+
+.chip:active {
+  cursor: grabbing;
+}
+
+.chip-dragging {
+  opacity: 0.4;
+}
+
+.chip-drop-target {
+  outline: 2px solid var(--brand-600);
+  outline-offset: 1px;
+}
+
+.chip-handle {
+  cursor: grab;
+  font-size: 12px;
+  margin-right: 2px;
+  color: var(--ink-400);
 }
 
 .chip-index {
