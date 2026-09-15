@@ -479,7 +479,12 @@
               <div class="block-title">异常高亮</div>
               <div class="inline-row">
                 <el-select v-model="form.query.highlight.field" placeholder="不启用高亮" clearable filterable class="cond-field">
-                  <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  <el-option-group label="表字段">
+                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                  </el-option-group>
+                  <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                    <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                  </el-option-group>
                 </el-select>
                 <el-select v-model="form.query.highlight.op" class="cond-op" :disabled="!form.query.highlight.field">
                   <el-option label="大于" value=">" />
@@ -647,7 +652,12 @@
                 <div class="inline-row">
                   <span class="muted">按</span>
                   <el-select v-model="form.at_config.field" placeholder="归属地字段" filterable class="cond-field">
-                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    <el-option-group label="表字段">
+                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    </el-option-group>
+                    <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                      <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                    </el-option-group>
                   </el-select>
                   <span class="muted">的取值，@ 对应归属地的负责人</span>
                 </div>
@@ -657,7 +667,12 @@
                 <div class="inline-row">
                   <span class="muted">按</span>
                   <el-select v-model="form.at_config.field" placeholder="人员姓名字段" filterable class="cond-field">
-                    <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    <el-option-group label="表字段">
+                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                    </el-option-group>
+                    <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                      <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                    </el-option-group>
                   </el-select>
                   <span class="muted">的取值匹配人员姓名后 @ 他</span>
                 </div>
@@ -669,7 +684,12 @@
                   <el-checkbox v-model="conditionEnabled">仅在满足条件时 @</el-checkbox>
                   <template v-if="conditionEnabled">
                     <el-select v-model="form.at_config.condition.field" placeholder="字段" filterable class="cond-field">
-                      <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                      <el-option-group label="表字段">
+                        <el-option v-for="c in columns" :key="c.name" :label="c.name" :value="c.name" />
+                      </el-option-group>
+                      <el-option-group v-if="aggColumns.length" label="分组汇总字段">
+                        <el-option v-for="name in aggColumns" :key="name" :label="name" :value="name" />
+                      </el-option-group>
                     </el-select>
                     <el-select v-model="form.at_config.condition.op" class="cond-op">
                       <el-option label="大于" value=">" />
