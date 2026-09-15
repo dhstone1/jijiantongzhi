@@ -225,7 +225,14 @@ def render_aligned_table(
     columns: list[str],
     highlight: dict | None = None,
     allow_html: bool = True,
+    max_width: int | None = None,
 ) -> str:
+    """按显示宽度对齐的文本表格。
+
+    max_width 留空表示列宽跟着内容走，不截断也不折行——放进代码块后，
+    钉钉按等宽文本渲染，长行可以横向滑动看全。
+    以前这里硬编码「超过 24 个字符就截断加省略号」，宽字段会被吃掉，所以改成默认不截。
+    """
     if not rows or not columns:
         return "（无数据）"
 
@@ -237,7 +244,7 @@ def render_aligned_table(
         width = display_width(name)
         for line in body:
             width = max(width, display_width(line[index]))
-        widths.append(min(width, 24))
+        widths.append(min(width, max_width) if max_width else width)
 
     lines = ["  ".join(pad(name, widths[i]) for i, name in enumerate(header))]
     lines.append("  ".join("-" * widths[i] for i in range(len(header))))
@@ -245,7 +252,7 @@ def render_aligned_table(
         cells = []
         for index, value in enumerate(values):
             value = escape_text(value)
-            if display_width(value) > widths[index]:
+            if max_width and display_width(value) > widths[index]:
                 value = value[: widths[index] - 1] + "…"
             cells.append(
                 _highlight_cell(
@@ -301,8 +308,9 @@ def render_table(
     if style == "md":
         return render_markdown_table(rows, columns, highlight)
     if style == "plain":
-        return render_aligned_table(rows, columns, highlight)
-    # code：钉钉里等宽显示，列一定对齐；代码块内 HTML 不生效，标红要去掉
+        # 纯文本消息没有横向滚动这回事，列宽收敛一点，免得一行长到没法读
+        return render_aligned_table(rows, columns, highlight, max_width=40)
+    # code：钉钉里等宽显示、长行不折行，可以横向滑动看全；代码块内 HTML 不生效，标红要去掉
     body = render_aligned_table(rows, columns, highlight, allow_html=False)
     return f"```\n{body}\n```"
 

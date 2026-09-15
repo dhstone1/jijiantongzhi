@@ -72,6 +72,18 @@
               </el-radio-group>
               <div class="hint">{{ msgTypeHint }}</div>
             </div>
+            <div v-if="pushStyle === 'table'" class="field">
+              <label>表格样式</label>
+              <el-select v-model="form.query.table_style" style="width: 100%">
+                <el-option
+                  v-for="style in tableStyles"
+                  :key="style.value"
+                  :label="style.label"
+                  :value="style.value"
+                />
+              </el-select>
+              <div class="hint">{{ tableStyleHint }}</div>
+            </div>
             <div class="field">
               <label>发送Excel</label>
               <el-switch v-model="form.send_excel" active-text="同时发送 Excel 数据文件" />
@@ -1188,6 +1200,23 @@ const pushStyleHint = computed(() =>
     ? '把结果画成一张 PNG 发到群里，手机上不用左右滑动。'
     : '把数据当成表格发到群里，一条消息里带完整的行列。',
 )
+
+const tableStyles = [
+  { value: 'md', label: '标准表格（钉钉按表格渲染，长内容会自动折行）' },
+  { value: 'code', label: '代码块表格（等宽不折行，长内容可左右滑动）' },
+  { value: 'plain', label: '纯文本对齐（靠空格对齐，列宽收敛到 40 字）' },
+]
+
+const tableStyleHint = computed(() => {
+  if (form.msg_type === 'text') return '纯文本消息不做 Markdown 渲染，实际按纯文本对齐发送。'
+  if (form.query.table_style === 'code') {
+    return '内容再长也不折行、不截断，在钉钉里可以左右滑动看全；代价是列宽不随屏幕变，列多时要滑。'
+  }
+  if (form.query.table_style === 'plain') {
+    return '超过 40 字的单元格会截断成省略号，只在必须发纯文本时用。'
+  }
+  return '钉钉把 | 列 | 列 | 渲染成真正的表格，排版跟着屏幕走，但长内容会折成多行。'
+})
 
 const regionHint = computed(() => {
   if (store.isAdmin) return '留空表示不按归属地过滤，全省数据都取；选了归属地就只取那一片。'
