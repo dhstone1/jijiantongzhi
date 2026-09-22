@@ -225,7 +225,14 @@ def render_aligned_table(
     columns: list[str],
     highlight: dict | None = None,
     allow_html: bool = True,
+    max_width: int | None = None,
 ) -> str:
+    """按显示宽度对齐的文本表格。
+
+    max_width 留空表示列宽跟着内容走，不截断也不折行——放进代码块后，
+    钉钉按等宽文本渲染，长行可以横向滑动看全。
+    以前这里硬编码「超过 24 个字符就截断加省略号」，宽字段会被吃掉，所以改成默认不截。
+    """
     if not rows or not columns:
         return "（无数据）"
 
@@ -237,7 +244,7 @@ def render_aligned_table(
         width = display_width(name)
         for line in body:
             width = max(width, display_width(line[index]))
-        widths.append(min(width, 24))
+        widths.append(min(width, max_width) if max_width else width)
 
     lines = ["  ".join(pad(name, widths[i]) for i, name in enumerate(header))]
     lines.append("  ".join("-" * widths[i] for i in range(len(header))))
@@ -245,7 +252,7 @@ def render_aligned_table(
         cells = []
         for index, value in enumerate(values):
             value = escape_text(value)
-            if display_width(value) > widths[index]:
+            if max_width and display_width(value) > widths[index]:
                 value = value[: widths[index] - 1] + "…"
             cells.append(
                 _highlight_cell(
@@ -301,10 +308,11 @@ def render_table(
     if style == "md":
         return render_markdown_table(rows, columns, highlight)
     if style == "plain":
-        return render_aligned_table(rows, columns, highlight)
-    # code：钉钉里等宽显示，列一定对齐；代码块内 HTML 不生效，标红要去掉
-    body = render_aligned_table(rows, columns, highlight, allow_html=False)
-    return f"```\n{body}\n```"
+        # 纯文本消息没有横向滚动这回事，列宽收敛一点，免得一行长到没法读
+        return render_aligned_table(rows, columns, highlight, max_width=40)
+    # code：画成带框线的等宽表格。用制表符而不是 ASCII 分隔行，
+    # 免得客户端不认代码块时，分隔行被当成 markdown 水平线。
+    return f"```\n{render_box_table(rows, columns)}\n```"
 
 
 def resolve_table_style(msg_type: str, query_cfg: dict | None) -> str:
@@ -313,6 +321,58 @@ def resolve_table_style(msg_type: str, query_cfg: dict | None) -> str:
         return "plain"
     style = str((query_cfg or {}).get("table_style") or "md").lower()
     return style if style in TABLE_STYLES else "md"
+
+
+def render_box_table(
+    rows: list[dict],
+    columns: list[str],
+    highlight: dict | None = None,
+) -> str:
+    """用制表符画一张带框线的表，放进代码块里发。
+
+    两个坑都在这儿绕过去了：
+      1. 旧的字符分隔行写成「------  ------」，这在 markdown 里是合法的水平线语法，
+         客户端一旦没把围栏当代码块，分隔行就变成一条横线，表就散了。
+         这里改用制表符（U+2500 系列），它不是任何 markdown 语法。
+      2. 补位用不换行空格（U+00A0）而不是普通空格——markdown 会把连续空格压成一个，
+         用不换行空格即使围栏没被识别，列宽也不会塌。
+    """
+    if not rows or not columns:
+        return "（无数据）"
+
+    pad_char = "\u00a0"
+
+    def fill(text: str, width: int) -> str:
+        text = escape_text(text)
+        return text + pad_char * max(0, width - display_width(text))
+
+    header = [str(c) for c in columns]
+    body = [[_value(row, c) for c in columns] for row in rows]
+
+    widths = []
+    for index, name in enumerate(header):
+        width = display_width(name)
+        for line in body:
+            width = max(width, display_width(escape_text(line[index])))
+        widths.append(width)
+
+    # 只用 + - | 这三个 ASCII 字符画框：
+    #   * 都是 1 格宽，不会被中文字体撑成两格
+    #   * 行首是「+」而不是一连串「-」，不会被 markdown 当成水平线或标题下划线
+    def rule() -> str:
+        return "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+
+    def line(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [rule()]
+    lines.append(line([fill(name, widths[i]) for i, name in enumerate(header)]))
+    lines.append(rule())
+    for row, values in zip(rows, body):
+        cells = [fill(value, widths[index]) for index, value in enumerate(values)]
+        lines.append(line(cells))
+    lines.append(rule())
+    return "\n".join(lines)
 
 
 def render_list(rows: list[dict], columns: list[str]) -> str:

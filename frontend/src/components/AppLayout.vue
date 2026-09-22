@@ -68,32 +68,21 @@ const groups = [
     label: '系统配置',
     adminOnly: true,
     items: [
-      // 全省级的配置，只有省级管理员能进
-      { to: '/datasources', label: '数据源', icon: 'Coin', provinceOnly: true },
+      { to: '/datasources', label: '数据源', icon: 'Coin' },
+      { to: '/imports', label: '数据文件', icon: 'FolderOpened' },
       { to: '/bots', label: '钉钉群', icon: 'ChatDotRound' },
       { to: '/regions', label: '归属地字典', icon: 'MapLocation' },
       { to: '/staff', label: '人员信息', icon: 'User' },
-      { to: '/settings', label: '系统设置', icon: 'Setting', provinceOnly: true },
+      { to: '/settings', label: '系统设置', icon: 'Setting' },
     ],
   },
 ]
 
-// 跟后端 services/scope.py 的 ROLE_MENUS 对应
-function canSee(item) {
-  if (store.isAdmin) return true
-  if (store.isCityAdmin) return !item.provinceOnly
-  // 普通人员：只有概览、推送规则、发送记录
-  return ['/dashboard', '/rules', '/logs'].includes(item.to)
-}
-
 const visibleGroups = computed(() => {
-  // 省级管理员看到全部；地市管理员看到本地管理那一组；普通人员只有基础菜单
-  return groups
-    .map((group) => ({
-      ...group,
-      items: group.items.filter(canSee),
-    }))
-    .filter((group) => group.items.length)
+  // 管理员看到全部
+  if (store.isAdmin) return groups
+  // 非管理员：只显示基础菜单
+  return groups.filter((group) => group.label === '')
 })
 
 const userInitial = computed(() => (store.user?.name || '?').slice(0, 1))

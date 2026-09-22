@@ -1,0 +1,42 @@
+services:
+  # -------- Backend (FastAPI + Uvicorn) --------
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: jijiantongzhi-backend
+    restart: unless-stopped
+    volumes:
+      - jijiantongzhi_data:/data
+    environment:
+      # Database: SQLite by default (stored in /data)
+      # To use PostgreSQL, uncomment and configure:
+      # SYSTEM_DB_URL: "postgresql://user:password@postgres:5432/jijiantongzhi"
+      APP_DATA_DIR: /data
+      APP_PORT: "18080"
+      # Public URL for DingTalk image access — change to your server address
+      PUBLIC_BASE_URL: ""
+      # Secret key (optional: auto-generated on first run if not set)
+      # APP_SECRET_KEY: "your-secret-key-here"
+    networks:
+      - jijiantongzhi_net
+
+  # -------- Frontend (Nginx + Vue SPA) --------
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: jijiantongzhi-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - jijiantongzhi_net
+
+volumes:
+  jijiantongzhi_data:
+
+networks:
+  jijiantongzhi_net:

@@ -32,3 +32,6 @@ Thumbs.db
 *.log
 *.db
 *.sqlite3
+
+# 部署打包产物
+deploy/*.zip

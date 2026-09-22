@@ -24,6 +24,8 @@ class DataSource(Base):
     password_enc: Mapped[str] = mapped_column(Text, default="")
     file_path: Mapped[str] = mapped_column(String(512), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 是否全员可见：数据文件导入自动生成的本地库默认公开，普通用户可直接引用
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
 
     meta_json: Mapped[str] = mapped_column(Text, default="{}")
     last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -162,3 +164,19 @@ class ResourcePermission(Base):
     resource_id: Mapped[int] = mapped_column(Integer, index=True)
     mobile: Mapped[str] = mapped_column(String(20), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class FileImportLog(Base):
+    """数据文件导入记录。"""
+
+    __tablename__ = "file_import_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prefix: Mapped[str] = mapped_column(String(128), index=True)
+    file_name: Mapped[str] = mapped_column(String(256), default="")
+    file_date: Mapped[str] = mapped_column(String(8), default="", index=True)
+    status: Mapped[str] = mapped_column(String(16), default="")  # success / skipped / failed
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)

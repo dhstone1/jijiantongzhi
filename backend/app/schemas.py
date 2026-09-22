@@ -20,6 +20,21 @@ class DataSourceIn(BaseModel):
     password: str = ""
     file_path: str = ""
     is_active: bool = True
+    is_public: bool = False
+
+
+class ImportConfigIn(BaseModel):
+    directory: str
+    scan_time: str = "08:00"
+    # 文件名格式模板：{前缀} 代表前缀，日期支持 {YYYYMMDD}/{YYYYMMDDHH}/{YYYYMMDDHHMM}/{YYYYMM}
+    pattern: str = "{前缀}_{YYYYMMDD}.txt"
+    # 导入成功后是否把原件改名为「已扫描_原文件名」
+    rename: bool = True
+
+
+class ImportRunIn(BaseModel):
+    prefix: str | None = None
+    force: bool = False
 
 
 class RegionIn(BaseModel):

@@ -1,0 +1,9 @@
+# shell 脚本必须保持 LF：在 Windows 上被 checkout 成 CRLF 的话，
+# 打进部署包拿到 Linux 上会直接报 `bash\r: No such file or directory`。
+*.sh text eol=lf
+
+# 批处理只能是 CRLF，否则 Windows 上跑不了
+*.bat text eol=crlf
+
+*.png binary
+*.xlsx binary
