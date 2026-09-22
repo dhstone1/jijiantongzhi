@@ -5,6 +5,9 @@
 
 导入成功后自动注册/更新数据源（db_type=sqlite, is_public=True），
 普通用户也能直接拿它配置推送规则。
+
+扫描的文件名格式可在「数据文件」页面自定义，例如 {前缀}_{YYYYMMDDHH}.csv；
+导入成功后原件会自动改名为「已扫描_原文件名」，下次扫描不会重复处理。
 """
 from __future__ import annotations
 
@@ -26,13 +29,29 @@ logger = logging.getLogger("jijiantongzhi.file_import")
 
 SETTING_DIR = "import_dir"
 SETTING_TIME = "import_time"
+SETTING_PATTERN = "import_pattern"
+SETTING_RENAME = "import_rename"
 DEFAULT_SCAN_TIME = "08:00"
+# 默认识别的文件名格式：前缀 + 日期 + 后缀
+DEFAULT_PATTERN = "{前缀}_{YYYYMMDD}.txt"
+# 导入成功后是否把原件改名为「已扫描_原文件名」
+DEFAULT_RENAME = True
 
-_FILE_RE = re.compile(r"^(.*)_(\d{8})\.txt$", re.IGNORECASE)
 _BATCH_SIZE = 5000
 # 只认「纯数字」的整数 / 小数，避免把带下划线分隔符的字符串（如告警流水号）误判成数值
 _RE_INT = re.compile(r"^-?\d+$")
 _RE_NUM = re.compile(r"^-?\d+(\.\d+)?$")
+
+# 文件名里支持的日期占位符；长的写在前面，避免 YYYYMMDD 抢走 YYYYMMDDHH
+DATE_PLACEHOLDERS: tuple[tuple[str, int], ...] = (
+    ("YYYYMMDDHHMM", 12),
+    ("YYYYMMDDHH", 10),
+    ("YYYYMMDD", 8),
+    ("YYYYMM", 6),
+)
+PREFIX_TOKEN = "{前缀}"
+# 扫描过的原件统一加这个前缀，一眼能看出哪些文件已经进过系统
+RENAMED_PREFIX = "已扫描"
 
 
 # ---------------------------------------------------------------- 配置（AppSetting）
@@ -51,15 +70,30 @@ def set_setting(db: Session, key: str, value: str) -> None:
     db.commit()
 
 
-def get_config(db: Session) -> dict[str, str]:
+def get_config(db: Session) -> dict[str, Any]:
     directory = get_setting(db, SETTING_DIR, str(DEFAULT_SCAN_DIR))
     scan_time = get_setting(db, SETTING_TIME, DEFAULT_SCAN_TIME)
     if not _is_valid_time(scan_time):
         scan_time = DEFAULT_SCAN_TIME
-    return {"directory": directory, "scan_time": scan_time}
+    pattern = get_setting(db, SETTING_PATTERN, DEFAULT_PATTERN)
+    if pattern_error(pattern):
+        pattern = DEFAULT_PATTERN
+    rename = get_setting(db, SETTING_RENAME, "1" if DEFAULT_RENAME else "0") == "1"
+    return {
+        "directory": directory,
+        "scan_time": scan_time,
+        "pattern": pattern,
+        "rename": rename,
+    }
 
 
-def save_config(db: Session, directory: str, scan_time: str) -> None:
+def save_config(
+    db: Session,
+    directory: str,
+    scan_time: str,
+    pattern: str = DEFAULT_PATTERN,
+    rename: bool = DEFAULT_RENAME,
+) -> None:
     directory = directory.strip()
     if not directory:
         raise ValueError("扫描目录不能为空")
@@ -67,8 +101,14 @@ def save_config(db: Session, directory: str, scan_time: str) -> None:
         raise ValueError(f"扫描目录不存在：{directory}")
     if not _is_valid_time(scan_time):
         raise ValueError("扫描时间格式应为 HH:MM")
+    pattern = (pattern or "").strip()
+    error = pattern_error(pattern)
+    if error:
+        raise ValueError(f"文件格式无效：{error}")
     set_setting(db, SETTING_DIR, directory)
     set_setting(db, SETTING_TIME, scan_time.strip())
+    set_setting(db, SETTING_PATTERN, pattern)
+    set_setting(db, SETTING_RENAME, "1" if rename else "0")
 
 
 def _is_valid_time(value: str) -> bool:
@@ -79,44 +119,108 @@ def _is_valid_time(value: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------- 文件名格式
+
+def _token(name: str) -> str:
+    """把 YYYYMMDD 这类日期名拼成 {YYYYMMDD} 占位符。"""
+    return "{" + name + "}"
+
+
+def pattern_error(pattern: str) -> str:
+    """校验文件名格式：合法返回空串，否则返回给管理员看的错误说明。"""
+    text = (pattern or "").strip()
+    if not text:
+        return "格式不能为空"
+    if PREFIX_TOKEN not in text:
+        return f"缺少 {PREFIX_TOKEN} 占位符（用它代表文件名前缀）"
+    if not any(_token(name) in text for name, _ in DATE_PLACEHOLDERS):
+        names = "、".join(_token(name) for name, _ in DATE_PLACEHOLDERS)
+        return f"缺少日期占位符，支持：{names}"
+    if not _get_suffix(text):
+        return "末尾要带上文件后缀，如 .txt、.csv"
+    return ""
+
+
+def build_pattern_regex(pattern: str) -> re.Pattern[str] | None:
+    """把文件名格式编译成正则：第 1 个捕获组是前缀，第 2 个捕获组是日期。
+
+    格式不合法（缺 {前缀}、缺日期占位符）时返回 None。
+    """
+    text = (pattern or "").strip()
+    if not text or PREFIX_TOKEN not in text:
+        return None
+    if not any(_token(name) in text for name, _ in DATE_PLACEHOLDERS):
+        return None
+    escaped = re.escape(text)
+    escaped = escaped.replace(re.escape(PREFIX_TOKEN), "(.*)")
+    for name, length in DATE_PLACEHOLDERS:
+        if _token(name) in text:
+            escaped = escaped.replace(re.escape(_token(name)), "([0-9]{" + str(length) + "})")
+    return re.compile("^" + escaped + "$", re.IGNORECASE)
+
+
+def _get_suffix(pattern: str) -> str:
+    """从格式里取出文件后缀（小写、带点）；取不到时返回空串，表示不按后缀过滤。"""
+    text = (pattern or "").strip()
+    end = text.rfind("}")
+    if end == -1 or end == len(text) - 1:
+        return ""
+    suffix = text[end + 1:].strip().lower()
+    if not suffix:
+        return ""
+    return suffix if suffix.startswith(".") else "." + suffix
+
+
 # ---------------------------------------------------------------- 扫描与导入
 
-def parse_filename(name: str) -> tuple[str, str] | None:
-    """从文件名解析 (前缀, 8 位日期)。"""
-    match = _FILE_RE.match(name)
+def parse_filename(name: str, pattern: str = DEFAULT_PATTERN) -> tuple[str, str] | None:
+    """从文件名解析 (前缀, 日期)。日期占位符由 pattern 决定。"""
+    compiled = build_pattern_regex(pattern)
+    if compiled is None:
+        return None
+    match = compiled.match(name)
     if not match:
         return None
     return match.group(1), match.group(2)
 
 
-def scan_files(directory: str) -> list[dict[str, str]]:
-    """扫描目录并按前缀分组，返回每个前缀日期最新的文件信息。"""
+def scan_files(directory: str, pattern: str = DEFAULT_PATTERN) -> list[dict[str, Any]]:
+    """扫描目录并按前缀分组，返回每个前缀日期最新的文件信息。
+
+    已经改名为「已扫描_原文件名」的文件也会被识别，这样导入完还能在页面上看到它。
+    """
     root = Path(directory)
     if not root.is_dir():
         raise FileNotFoundError(f"扫描目录不存在：{directory}")
-    found: dict[str, dict[str, str]] = {}
+    suffix = _get_suffix(pattern)
+    found: dict[str, dict[str, Any]] = {}
     for path in sorted(root.iterdir(), key=lambda item: item.name.lower()):
-        if not path.is_file() or path.suffix.lower() != ".txt":
+        if not path.is_file():
             continue
-        parsed = parse_filename(path.name)
+        if suffix and path.suffix.lower() != suffix:
+            continue
+        renamed = path.name.startswith(RENAMED_PREFIX)
+        name = path.name[len(RENAMED_PREFIX):].lstrip("_") if renamed else path.name
+        parsed = parse_filename(name, pattern)
         if parsed is None:
             continue
         prefix, file_date = parsed
         current = found.get(prefix)
-        if current is None or file_date > current["file_date"]:
+        if current is None or (file_date, not renamed) > (current["file_date"], not current["renamed"]):
             found[prefix] = {
                 "prefix": prefix,
                 "file_name": path.name,
                 "file_date": file_date,
                 "path": str(path),
+                "renamed": renamed,
             }
     return sorted(found.values(), key=lambda item: item["prefix"])
 
 
-def scan_status(db: Session, directory: str) -> list[dict[str, Any]]:
+def scan_status(db: Session, directory: str, pattern: str = DEFAULT_PATTERN) -> list[dict[str, Any]]:
     """扫描目录并附带每个前缀的导入状态，供管理页展示。"""
     result: list[dict[str, Any]] = []
-    for item in scan_files(directory):
+    for item in scan_files(directory, pattern):
         prefix = item["prefix"]
         last = (
             db.query(FileImportLog)
@@ -135,6 +239,7 @@ def scan_status(db: Session, directory: str) -> list[dict[str, Any]]:
                 if last and last.file_date == item["file_date"]
                 else ("imported" if last else "pending"),
                 "row_count": last.row_count if last else 0,
+                "renamed": bool(item.get("renamed")),
                 "ds_id": ds.id if ds else None,
                 "db_path": str(IMPORT_DIR / f"{prefix}.db"),
             }
@@ -142,19 +247,40 @@ def scan_status(db: Session, directory: str) -> list[dict[str, Any]]:
     return result
 
 
-def run_imports(db: Session, directory: str, prefix: str | None = None, force: bool = False) -> list[dict[str, Any]]:
+def run_imports(
+    db: Session,
+    directory: str,
+    pattern: str = DEFAULT_PATTERN,
+    rename: bool = DEFAULT_RENAME,
+    prefix: str | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
     """按目录导入：不指定前缀时导入所有前缀的最新文件。"""
-    files = scan_files(directory)
+    files = scan_files(directory, pattern)
     if prefix:
         files = [item for item in files if item["prefix"] == prefix]
-    return [import_file(db, item, force=force) for item in files]
+    results: list[dict[str, Any]] = []
+    for item in files:
+        result = import_file(db, item, force=force)
+        # 导入成功、或系统确认这文件已经是最新之后，给原件改名，标记它已经处理过
+        if rename and result["status"] in ("success", "skipped"):
+            renamed_to = _rename_scanned_file(item["path"])
+            if renamed_to:
+                result["renamed_to"] = renamed_to
+        results.append(result)
+    return results
 
 
 def run_scheduled(db: Session) -> None:
     """定时任务入口：扫描目录并导入所有新版本文件，失败只记日志不中断。"""
     try:
         cfg = get_config(db)
-        results = run_imports(db, cfg["directory"])
+        results = run_imports(
+            db,
+            cfg["directory"],
+            pattern=cfg["pattern"],
+            rename=cfg["rename"],
+        )
     except Exception as exc:  # noqa: BLE001 - 定时任务不能抛出去
         logger.error("定时导入失败：%s", exc)
         return
@@ -250,6 +376,29 @@ def import_file(db: Session, item: dict[str, str], force: bool = False) -> dict[
     db.commit()
     metadata.drop_engine(ds)
     return finish("success", row_count=len(rows))
+
+
+# ---------------------------------------------------------------- 文件改名
+
+def _rename_scanned_file(file_path: str) -> str:
+    """把已扫描的原件改名为「已扫描_原文件名」，返回新文件名；失败或无需改名时返回空串。"""
+    path = Path(str(file_path or ""))
+    if not path.is_file():
+        return ""
+    if path.name.startswith(RENAMED_PREFIX):
+        return ""
+    target = path.parent / f"{RENAMED_PREFIX}_{path.name}"
+    index = 2
+    while target.exists():
+        target = path.parent / f"{RENAMED_PREFIX}_{index}_{path.name}"
+        index += 1
+    try:
+        path.rename(target)
+    except OSError as exc:  # noqa: BLE001 - 改名失败不能影响导入结果
+        logger.warning("文件改名失败 %s：%s", path.name, exc)
+        return ""
+    logger.info("文件已改名：%s -> %s", path.name, target.name)
+    return target.name
 
 
 # ---------------------------------------------------------------- 解析与写库

@@ -20,7 +20,13 @@ def get_import_config(db: Session = Depends(get_db)) -> dict:
 @router.put("/imports/config")
 def update_import_config(payload: ImportConfigIn, db: Session = Depends(get_db)) -> dict:
     try:
-        file_import.save_config(db, payload.directory, payload.scan_time)
+        file_import.save_config(
+            db,
+            payload.directory,
+            payload.scan_time,
+            pattern=payload.pattern,
+            rename=payload.rename,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     scheduler.sync_import_job()
@@ -31,7 +37,7 @@ def update_import_config(payload: ImportConfigIn, db: Session = Depends(get_db))
 def scan_imports(db: Session = Depends(get_db)) -> dict:
     cfg = file_import.get_config(db)
     try:
-        types = file_import.scan_status(db, cfg["directory"])
+        types = file_import.scan_status(db, cfg["directory"], cfg["pattern"])
     except Exception as exc:  # noqa: BLE001 - 把真实错误回显给管理员
         raise HTTPException(status_code=400, detail=f"扫描失败：{exc}") from exc
     return {"directory": cfg["directory"], "types": types}
@@ -44,6 +50,8 @@ def run_imports(payload: ImportRunIn, db: Session = Depends(get_db)) -> dict:
         results = file_import.run_imports(
             db,
             cfg["directory"],
+            pattern=cfg["pattern"],
+            rename=cfg["rename"],
             prefix=payload.prefix,
             force=payload.force,
         )

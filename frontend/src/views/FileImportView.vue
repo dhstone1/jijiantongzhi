@@ -3,7 +3,8 @@
     <div class="page-head">
       <div>
         <h1 class="page-title">数据文件</h1>
-        <p class="page-sub">每天按固定时间扫描目录里的 {前缀}_{YYYYMMDD}.txt，导入本地 SQLite 库并自动注册为全员可见的数据源，可直接配推送规则。</p>
+        <p class="page-sub">每天按固定时间扫描目录里的数据文件，导入本地 SQLite 库并自动注册为全员可见的数据源，可直接配推送规则。</p>
+        <p class="page-sub muted">文件名格式可自定义（如 {前缀}_{YYYYMMDDHH}.csv）；导入成功后原件会自动改名为「已扫描_原文件名」，下次扫描不会再重复处理。</p>
       </div>
     </div>
 
@@ -14,9 +15,25 @@
       <div class="panel-body">
         <div class="config-line">
           <label class="muted">目录</label>
-          <el-input v-model="directory" class="config-input" placeholder="例如：D:\数据源（放 {前缀}_{YYYYMMDD}.txt 的文件夹）" />
+          <el-input v-model="directory" class="config-input" placeholder="例如：D:\数据源（放数据文件的文件夹）" />
           <label class="muted">每天扫描</label>
           <el-time-picker v-model="scanTime" format="HH:mm" value-format="HH:mm" placeholder="扫描时间" style="width: 140px" />
+        </div>
+        <div class="config-line config-line-second">
+          <label class="muted">文件名格式</label>
+          <el-input v-model="pattern" class="config-input config-input-format" placeholder="{前缀}_{YYYYMMDD}.txt" />
+          <el-tooltip placement="top">
+            <template #content>
+              <div>占位符：{前缀} 代表文件名前缀</div>
+              <div>日期可用 {YYYYMMDD}、{YYYYMMDDHH}、{YYYYMMDDHHMM}、{YYYYMM}</div>
+              <div>末尾写文件后缀，例：{前缀}_{YYYYMMDDHH}.csv</div>
+            </template>
+            <span class="muted help">格式说明</span>
+          </el-tooltip>
+        </div>
+        <div class="config-line config-line-second">
+          <el-checkbox v-model="rename">导入后原件改名加「已扫描_」</el-checkbox>
+          <span class="spacer" />
           <el-button type="primary" :loading="saving" @click="saveConfig">保存</el-button>
         </div>
         <div class="action-line">
@@ -35,8 +52,8 @@
         <el-table :data="types" v-loading="scanning" style="width: 100%">
           <el-table-column prop="prefix" label="前缀 / 库名" min-width="200" show-overflow-tooltip />
           <el-table-column prop="file_name" label="最新文件" min-width="200" show-overflow-tooltip />
-          <el-table-column prop="file_date" label="文件日期" width="105" />
-          <el-table-column label="已导入日期" width="105">
+          <el-table-column prop="file_date" label="文件日期" width="150" />
+          <el-table-column label="已导入日期" width="125">
             <template #default="{ row }">{{ row.imported_date || '—' }}</template>
           </el-table-column>
           <el-table-column prop="row_count" label="行数" width="80" />
@@ -72,7 +89,7 @@
           </el-table-column>
         </el-table>
         <div v-if="!types.length && !scanning" class="empty">
-          目录里还没有 {前缀}_{YYYYMMDD}.txt 文件，或尚未扫描
+          目录里还没有匹配「{{ pattern }}」的文件，或尚未扫描
         </div>
       </div>
     </section>
@@ -121,6 +138,8 @@ import { api } from '../api'
 const router = useRouter()
 const directory = ref('')
 const scanTime = ref('08:00')
+const pattern = ref('{前缀}_{YYYYMMDD}.txt')
+const rename = ref(true)
 const saving = ref(false)
 const scanning = ref(false)
 const importing = ref(false)
@@ -135,8 +154,12 @@ onMounted(async () => {
     const config = await api.getImportConfig()
     directory.value = config.directory
     scanTime.value = config.scan_time
+    pattern.value = config.pattern || '{前缀}_{YYYYMMDD}.txt'
+    rename.value = config.rename !== false
   } catch {
     scanTime.value = '08:00'
+    pattern.value = '{前缀}_{YYYYMMDD}.txt'
+    rename.value = true
   }
   scan()
   loadLogs()
@@ -144,9 +167,15 @@ onMounted(async () => {
 
 async function saveConfig() {
   if (!directory.value.trim()) return ElMessage.warning('请填写扫描目录')
+  if (!pattern.value.trim()) return ElMessage.warning('请填写文件名格式')
   saving.value = true
   try {
-    await api.saveImportConfig({ directory: directory.value.trim(), scan_time: scanTime.value || '08:00' })
+    await api.saveImportConfig({
+      directory: directory.value.trim(),
+      scan_time: scanTime.value || '08:00',
+      pattern: pattern.value.trim(),
+      rename: rename.value,
+    })
     ElMessage.success('已保存，每日定时任务已更新')
   } finally {
     saving.value = false
@@ -187,8 +216,9 @@ async function importOne(prefix, force) {
     const first = result.results[0]
     if (!first) return ElMessage.warning('目录中未找到该前缀的文件')
     if (first.status === 'failed') return ElMessage.error(first.error)
-    if (first.status === 'skipped') return ElMessage.success(`「${prefix}」已是最新，跳过（可点强制重导）`)
-    ElMessage.success(`「${prefix}」导入完成，共 ${first.row_count} 行`)
+    const tip = first.renamed_to ? `，原件已改名为「${first.renamed_to}」` : ''
+    if (first.status === 'skipped') return ElMessage.success(`「${prefix}」已是最新，跳过（可点强制重导）${tip}`)
+    ElMessage.success(`「${prefix}」导入完成，共 ${first.row_count} 行${tip}`)
   } finally {
     importingPrefix.value = null
     scan()
@@ -223,11 +253,37 @@ function goDatasources() {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.config-line > .muted {
+  flex: none;
+  white-space: nowrap;
 }
 
 .config-input {
   width: 480px;
   max-width: 100%;
+}
+
+.config-input-format {
+  flex: 1 1 240px;
+  width: auto;
+  min-width: 200px;
+}
+
+.config-line-second {
+  margin-top: 10px;
+}
+
+.help {
+  cursor: help;
+  text-decoration: underline dotted;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
 }
 
 .action-line {
