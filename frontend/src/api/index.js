@@ -81,6 +81,13 @@ export const api = {
   updateSettings: (data) => http.put('/settings', data),
   testImageHost: () => http.post('/settings/test-image-host'),
 
+  // 数据文件导入
+  getImportConfig: () => http.get('/imports/config'),
+  saveImportConfig: (data) => http.put('/imports/config', data),
+  scanImports: () => http.post('/imports/scan'),
+  runImport: (data) => http.post('/imports/import', data),
+  listImportLogs: (params) => http.get('/imports/logs', { params }),
+
   // 记录
   listLogs: (params) => http.get('/logs', { params }),
   getLog: (id) => http.get(`/logs/${id}`),

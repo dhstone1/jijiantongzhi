@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from . import seed
-from .api import basic, datasources, logs, rules
+from .api import basic, datasources, imports, logs, rules
 from .config import IMAGE_DIR, IMAGE_URL_PREFIX
 from .db import init_db
 from .services import scheduler
@@ -43,6 +43,7 @@ app.add_middleware(
 
 app.include_router(basic.router, prefix="/api", tags=["基础配置"])
 app.include_router(datasources.router, prefix="/api", tags=["数据源"])
+app.include_router(imports.router, prefix="/api", tags=["数据文件导入"])
 app.include_router(rules.router, prefix="/api", tags=["推送规则"])
 app.include_router(logs.router, prefix="/api", tags=["记录与统计"])
 

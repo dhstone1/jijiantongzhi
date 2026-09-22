@@ -57,6 +57,10 @@
             <el-radio-button value="sqlite">本地文件库</el-radio-button>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="可见范围">
+          <el-switch v-model="form.is_public" />
+          <span class="muted" style="margin-left: 8px">全员可见（普通用户可直接在推送规则中引用）</span>
+        </el-form-item>
 
         <template v-if="form.db_type === 'postgresql'">
           <el-form-item label="主机">
@@ -172,6 +176,7 @@ const form = reactive({
   password: '',
   file_path: '',
   is_active: true,
+  is_public: false,
 })
 
 const store = useUserStore()
@@ -209,6 +214,7 @@ function openDialog(row) {
     password: '',
     file_path: row?.file_path || '',
     is_active: row?.is_active ?? true,
+    is_public: row?.is_public ?? false,
   })
   permittedMobiles.value = []
   Promise.all([

@@ -18,6 +18,7 @@ const routes = [
       { path: 'rules/new', name: 'rule-new', component: () => import('../views/RuleEditView.vue') },
       { path: 'rules/:id/edit', name: 'rule-edit', component: () => import('../views/RuleEditView.vue') },
       { path: 'datasources', name: 'datasources', component: () => import('../views/DataSourceView.vue') },
+      { path: 'imports', name: 'imports', component: () => import('../views/FileImportView.vue') },
       { path: 'regions', name: 'regions', component: () => import('../views/RegionView.vue') },
       { path: 'staff', name: 'staff', component: () => import('../views/StaffView.vue') },
       { path: 'bots', name: 'bots', component: () => import('../views/BotView.vue') },

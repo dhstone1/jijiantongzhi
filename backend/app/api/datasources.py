@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -28,6 +29,7 @@ def _to_dict(item: DataSource) -> dict:
         "password": mask(decrypt(item.password_enc)),
         "file_path": item.file_path,
         "is_active": item.is_active,
+        "is_public": item.is_public,
         "last_test_at": item.last_test_at,
         "last_test_ok": item.last_test_ok,
         "last_test_msg": item.last_test_msg,
@@ -55,7 +57,10 @@ def list_datasources(mobile: str = Query(""), db: Session = Depends(get_db)):
                     ResourcePermission.mobile == mobile,
                 ).all()
             ]
-            query = query.filter(DataSource.id.in_(permitted_ids) if permitted_ids else False)
+            conditions = [DataSource.is_public.is_(True)]
+            if permitted_ids:
+                conditions.append(DataSource.id.in_(permitted_ids))
+            query = query.filter(or_(*conditions))
     return [_to_dict(item) for item in query.order_by(DataSource.id).all()]
 
 
@@ -73,6 +78,7 @@ def create_datasource(payload: DataSourceIn, db: Session = Depends(get_db)):
         password_enc=encrypt(payload.password),
         file_path=payload.file_path,
         is_active=payload.is_active,
+        is_public=payload.is_public,
     )
     db.add(item)
     db.commit()
@@ -90,6 +96,7 @@ def update_datasource(data_source_id: int, payload: DataSourceIn, db: Session = 
     item.username = payload.username
     item.file_path = payload.file_path
     item.is_active = payload.is_active
+    item.is_public = payload.is_public
     if payload.password and "*" not in payload.password:
         item.password_enc = encrypt(payload.password)
     db.commit()

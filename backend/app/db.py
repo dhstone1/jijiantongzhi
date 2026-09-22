@@ -36,6 +36,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "last_fired_at": "TIMESTAMP",
         "image_json": "TEXT DEFAULT '{}'",
     },
+    "data_source": {
+        "is_public": "BOOLEAN DEFAULT 0",
+    },
 }
 
 

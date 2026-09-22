@@ -69,6 +69,7 @@ const groups = [
     adminOnly: true,
     items: [
       { to: '/datasources', label: '数据源', icon: 'Coin' },
+      { to: '/imports', label: '数据文件', icon: 'FolderOpened' },
       { to: '/bots', label: '钉钉群', icon: 'ChatDotRound' },
       { to: '/regions', label: '归属地字典', icon: 'MapLocation' },
       { to: '/staff', label: '人员信息', icon: 'User' },

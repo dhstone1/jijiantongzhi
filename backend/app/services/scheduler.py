@@ -13,11 +13,14 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from ..db import SessionLocal
 from ..models import PushRule
-from . import executor
+from . import executor, file_import
 
 logger = logging.getLogger("jijiantongzhi.scheduler")
 
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+
+# 数据文件定时扫描导入任务（固定一个每天任务，时间点在管理页可配）
+_IMPORT_JOB_ID = "file_import_daily"
 
 
 def _job_id(rule_id: int) -> str:
@@ -44,6 +47,42 @@ def _run(rule_id: int) -> None:
             logger.warning("规则 %s 执行失败：%s", rule.name, result.get("error"))
     finally:
         db.close()
+
+
+def _run_import_job() -> None:
+    db = SessionLocal()
+    try:
+        file_import.run_scheduled(db)
+    finally:
+        db.close()
+
+
+def sync_import_job() -> None:
+    """按 AppSetting 里的扫描时间重建每日导入任务。"""
+    try:
+        scheduler.remove_job(_IMPORT_JOB_ID)
+    except Exception:  # noqa: BLE001 - 任务不存在
+        pass
+
+    db = SessionLocal()
+    try:
+        config = file_import.get_config(db)
+    finally:
+        db.close()
+
+    try:
+        hour, minute = config["scan_time"].strip().split(":")
+    except ValueError:
+        hour, minute = 8, 0
+    scheduler.add_job(
+        _run_import_job,
+        trigger=CronTrigger(hour=int(hour), minute=int(minute)),
+        id=_IMPORT_JOB_ID,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+        replace_existing=True,
+    )
 
 
 def build_trigger(rule: PushRule):
@@ -120,6 +159,7 @@ def start() -> None:
     if not scheduler.running:
         scheduler.start()
     count = reload_all()
+    sync_import_job()
     logger.info("调度器已启动，共 %d 条定时规则", count)
 
 
