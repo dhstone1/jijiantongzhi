@@ -20,6 +20,17 @@ class DataSourceIn(BaseModel):
     password: str = ""
     file_path: str = ""
     is_active: bool = True
+    is_public: bool = False
+
+
+class ImportConfigIn(BaseModel):
+    directory: str
+    scan_time: str = "08:00"
+
+
+class ImportRunIn(BaseModel):
+    prefix: str | None = None
+    force: bool = False
 
 
 class RegionIn(BaseModel):

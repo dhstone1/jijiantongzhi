@@ -15,14 +15,15 @@ const routes = [
       { path: '', redirect: '/dashboard' },
       { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
       { path: 'rules', name: 'rules', component: () => import('../views/RulesView.vue') },
-      { path: 'rules/new', name: 'rule-new', component: () => import('../views/RuleEditView.vue'), meta: { needRules: true } },
-      { path: 'rules/:id/edit', name: 'rule-edit', component: () => import('../views/RuleEditView.vue'), meta: { needRules: true } },
-      { path: 'datasources', name: 'datasources', component: () => import('../views/DataSourceView.vue'), meta: { provinceOnly: true } },
-      { path: 'regions', name: 'regions', component: () => import('../views/RegionView.vue'), meta: { needLocal: true } },
-      { path: 'staff', name: 'staff', component: () => import('../views/StaffView.vue'), meta: { needLocal: true } },
-      { path: 'bots', name: 'bots', component: () => import('../views/BotView.vue'), meta: { needLocal: true } },
+      { path: 'rules/new', name: 'rule-new', component: () => import('../views/RuleEditView.vue') },
+      { path: 'rules/:id/edit', name: 'rule-edit', component: () => import('../views/RuleEditView.vue') },
+      { path: 'datasources', name: 'datasources', component: () => import('../views/DataSourceView.vue') },
+      { path: 'imports', name: 'imports', component: () => import('../views/FileImportView.vue') },
+      { path: 'regions', name: 'regions', component: () => import('../views/RegionView.vue') },
+      { path: 'staff', name: 'staff', component: () => import('../views/StaffView.vue') },
+      { path: 'bots', name: 'bots', component: () => import('../views/BotView.vue') },
       { path: 'logs', name: 'logs', component: () => import('../views/LogView.vue') },
-      { path: 'settings', name: 'settings', component: () => import('../views/SettingsView.vue'), meta: { provinceOnly: true } },
+      { path: 'settings', name: 'settings', component: () => import('../views/SettingsView.vue') },
     ],
   },
 ]
@@ -40,11 +41,8 @@ router.beforeEach((to) => {
   if (to.name === 'login' && store.isLoggedIn) {
     return { name: 'dashboard' }
   }
-  // 菜单藏起来还不够，直接敲地址也得拦住
-  if (to.meta.provinceOnly && !store.isAdmin) return { name: 'dashboard' }
-  if (to.meta.needLocal && !store.canManageLocal) return { name: 'dashboard' }
-  if (to.meta.needRules && !store.canManageRules) return { name: 'dashboard' }
   return true
 })
 
 export default router
+

@@ -40,6 +40,9 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "dingtalk_bot": {
         "region_name": "VARCHAR(64) DEFAULT ''",
     },
+    "data_source": {
+        "is_public": "BOOLEAN DEFAULT 0",
+    },
 }
 
 

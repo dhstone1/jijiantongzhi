@@ -43,6 +43,13 @@ SECRET_KEY, SECRET_KEY_AUTO_GENERATED = _resolve_secret_key()
 # 演示业务库（模拟公共数据库）的位置
 DEMO_DB_PATH = DATA_DIR / "demo_business.db"
 
+# 数据文件导入：生成的本地 SQLite 库存放目录
+IMPORT_DIR = Path(os.getenv("APP_IMPORT_DATA_DIR", DATA_DIR / "imports"))
+IMPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+# 数据文件导入：默认扫描目录（项目根目录下的「数据源」文件夹），运行期可在页面配置
+DEFAULT_SCAN_DIR = Path(os.getenv("APP_SCAN_DIR", Path(__file__).resolve().parent.parent.parent / "数据源"))
+
 # 单次推送最大行数上限，防止刷屏
 MAX_ROWS_HARD_LIMIT = int(os.getenv("MAX_ROWS_HARD_LIMIT", "200"))
 
