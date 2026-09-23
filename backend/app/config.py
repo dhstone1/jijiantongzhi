@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", BASE_DIR / "data"))
@@ -67,6 +68,29 @@ SERVER_PORT = int(os.getenv("APP_PORT", "18080"))
 IMAGE_DIR = Path(os.getenv("APP_IMAGE_DIR", DATA_DIR / "images"))
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 IMAGE_URL_PREFIX = "/static/reports"
+
+
+def _normalize_base_path(raw: str) -> str:
+    """把子路径统一成空串或 /xxx（带前导斜杠、不带尾部斜杠）。"""
+    value = (raw or "").strip()
+    if not value or value == "/":
+        return ""
+    if "://" in value:  # 误填成完整网址时只取路径部分
+        value = urlsplit(value).path
+    value = "/" + value.strip("/")
+    return "" if value == "/" else value
+
+
+# 站点对外的子路径前缀。nginx 把站点挂在 http://host/jijiantongzhi/ 下时，
+# 后端生成的图片 / 附件地址必须带上这一层，否则钉钉拿到的是根路径，图片会裂。
+APP_BASE_PATH = _normalize_base_path(os.getenv("APP_BASE_PATH", ""))
+
+
+def with_base_path(path: str) -> str:
+    """给对外路径加上子路径前缀（没配前缀时原样返回）。"""
+    if not APP_BASE_PATH:
+        return path
+    return f"{APP_BASE_PATH}{path}" if path.startswith("/") else f"{APP_BASE_PATH}/{path}"
 
 # 钉钉客户端访问图片用的地址，留空表示未配置（运行期可在「系统设置」里改）
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")

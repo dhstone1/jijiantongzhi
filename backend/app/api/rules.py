@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from ..config import IMAGE_URL_PREFIX
+from ..config import APP_BASE_PATH, IMAGE_URL_PREFIX
 
 # 预览最多取这么多行：limit 由调用者传，必须在服务端封顶
 MAX_PREVIEW_ROWS = 500
@@ -399,7 +399,7 @@ def preview_rule(payload: PreviewIn, mobile: str = Query(""), db: Session = Depe
                     footer=image_cfg.get("footer") or "",
                 )
                 filename = image_store.save(png, tag=image_store.PREVIEW_TAG)
-                image_path = f"{IMAGE_URL_PREFIX}/{filename}"
+                image_path = f"{APP_BASE_PATH}{IMAGE_URL_PREFIX}/{filename}"
                 base = image_store.base_url(db)
                 image_url = image_store.url_for(base, filename) if base else ""
                 render_warnings.extend(image_warnings_msg)

@@ -1,21 +1,33 @@
 # ---- Build stage ----
 FROM node:20-slim AS frontend-builder
 
+# 依赖源：默认用 npmmirror（国内快很多）。
+# 想走官方源就加：docker build --build-arg NPM_REGISTRY=https://registry.npmjs.org
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund --registry="$NPM_REGISTRY"
 
 COPY frontend/ ./
+
+# 站点挂在子路径下，构建时把 vite base 一起打进去：
+# 产物里的 index.html / 静态资源 / 接口地址都会自动带 /jijiantongzhi/
+ENV VITE_BASE=/jijiantongzhi/
 RUN npm run build
 
 # ---- Runtime stage ----
 FROM nginx:alpine
 
-# Copy built frontend
-COPY --from=frontend-builder /build/dist /usr/share/nginx/html
+# 前端产物放到 /usr/share/nginx/html/jijiantongzhi/，正好对应访问路径
+COPY --from=frontend-builder /build/dist /usr/share/nginx/html/jijiantongzhi
 
-# Copy nginx config
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+# nginx 官方入口脚本里有一步 "10-listen-on-ipv6-by-default"，它会调 apk manifest 给官方默认
+# conf 补 IPv6。我们用的是自己的 conf，这个脚本没用，而且在部分环境（WSL2 + Docker Desktop）
+# 会卡在 apk manifest 上，导致 nginx 永远起不来 —— 直接删掉。
+RUN rm -f /docker-entrypoint.d/10-listen-on-ipv6-by-default.sh
 
 EXPOSE 80
 

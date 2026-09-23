@@ -35,3 +35,7 @@ Thumbs.db
 
 # 部署打包产物
 deploy/*.zip
+
+# Docker 镜像包产物（一个 tar 一百多 MB，别入库）
+deploy/docker-dist/
+deploy/jijiantongzhi-docker-*.zip

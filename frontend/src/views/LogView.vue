@@ -118,7 +118,9 @@ const detailImage = computed(() => {
   if (!match) return ''
   const url = match[1]
   const index = url.indexOf('/static/')
-  return index >= 0 ? url.slice(index) : url
+  if (index < 0) return url
+  const base = (import.meta.env.BASE_URL || '/').replace(/\/$/, '')
+  return `${base}${url.slice(index)}`
 })
 
 onMounted(load)

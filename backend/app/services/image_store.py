@@ -14,7 +14,14 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from ..config import DATA_DIR, IMAGE_DIR, IMAGE_RETENTION_DAYS, IMAGE_URL_PREFIX, PUBLIC_BASE_URL
+from ..config import (
+    APP_BASE_PATH,
+    DATA_DIR,
+    IMAGE_DIR,
+    IMAGE_RETENTION_DAYS,
+    IMAGE_URL_PREFIX,
+    PUBLIC_BASE_URL,
+)
 from ..models import AppSetting
 from ..security import decrypt, encrypt
 from . import image_host
@@ -142,7 +149,8 @@ def save(payload: bytes, rule_id: int | None = None, tag: str = "", suffix: str 
 
 
 def url_for(base: str, filename: str) -> str:
-    return f"{base.rstrip('/')}{IMAGE_URL_PREFIX}/{filename}"
+    """拼出对外可访问的图片 / 附件地址（含子路径前缀）。"""
+    return f"{base.rstrip('/')}{APP_BASE_PATH}{IMAGE_URL_PREFIX}/{filename}"
 
 
 def path_for(filename: str) -> Path:

@@ -1,0 +1,41 @@
+# 构建镜像时不要打进这些东西（.gitignore 对 docker 不起作用，必须单独写）
+
+# ---- 版本控制与本地配置 ----
+.git
+.gitattributes
+.gitignore
+
+# ---- 运行时数据：绝对不能进镜像 ----
+# backend/data 里有系统库、secret.key（加密了钉钉 webhook 等）、演示库、报表图片
+backend/data/
+数据源/
+**/*.db
+**/*.sqlite3
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 前端 ----
+**/node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---- 本地草稿、排查脚本、日志 ----
+work/
+*.log
+
+# ---- 打包产物 ----
+deploy/docker-dist/
+deploy/*.zip
+deploy-docker.rar
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

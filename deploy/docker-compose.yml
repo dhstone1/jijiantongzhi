@@ -1,11 +1,8 @@
-# 本机（源码目录）构建并运行：docker compose up -d --build
-# 分发到别的机器用 deploy/docker-compose.yml（只引用构建好的镜像）
+# 目标机器上的部署文件：镜像由 install.sh / 安装.bat 先 docker load 进来
+# 可调的项写在同目录 .env 里（WEB_PORT、PUBLIC_BASE_URL）
 services:
   backend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
-    image: jijiantongzhi-backend:${TAG:-2.1}
+    image: jijiantongzhi-backend:2.1
     container_name: jijiantongzhi-backend
     restart: unless-stopped
     volumes:
@@ -14,18 +11,13 @@ services:
       APP_DATA_DIR: /app/data
       APP_BASE_PATH: /jijiantongzhi
       APP_PORT: "18080"
-      # 钉钉客户端拉图片用的地址，例如 http://192.168.1.9（不要带 /jijiantongzhi）
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
-      # 用 PostgreSQL 时改成 postgresql://user:pwd@host:5432/db
-      # SYSTEM_DB_URL: ""
+      TZ: Asia/Shanghai
     networks:
       - jijiantongzhi_net
 
   frontend:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.frontend
-    image: jijiantongzhi-frontend:${TAG:-2.1}
+    image: jijiantongzhi-frontend:2.1
     container_name: jijiantongzhi-frontend
     restart: unless-stopped
     ports:

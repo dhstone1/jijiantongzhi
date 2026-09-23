@@ -1,8 +1,13 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 
+// 站点可能挂在子路径下（vite base），接口地址要跟着走：
+// base=/ -> /api ；base=/jijiantongzhi/ -> /jijiantongzhi/api
+const APP_BASE = import.meta.env.BASE_URL || '/'
+const API_BASE = `${APP_BASE.replace(/\/$/, '')}/api`
+
 const http = axios.create({
-  baseURL: '/api',
+  baseURL: API_BASE,
   timeout: 60000,
 })
 
@@ -51,7 +56,7 @@ function withMe(params = {}) {
 // 模板下载要走浏览器原生下载，用 axios 反而拿不到 Content-Disposition 里的文件名
 export function downloadTemplate(kind) {
   const params = new URLSearchParams({ mobile: currentMobile() })
-  window.location.href = `/api/templates/${kind}?${params.toString()}`
+  window.location.href = `${API_BASE}/templates/${kind}?${params.toString()}`
 }
 
 export const api = {

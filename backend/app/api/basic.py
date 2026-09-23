@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ..config import IMAGE_DIR, IMAGE_URL_PREFIX, SERVER_PORT
+from ..config import IMAGE_DIR, IMAGE_URL_PREFIX, SERVER_PORT, with_base_path
 from ..db import get_db
 from ..models import DingTalkBot, Region, ResourcePermission, Staff
 from ..schemas import BotIn, LoginIn, RegionIn, SettingsIn, StaffIn, PermissionGrantIn
@@ -821,7 +821,7 @@ def get_settings(mobile: str = Query(""), db: Session = Depends(get_db)) -> dict
         ).lower() in ("1", "true", "yes", "on"),
         "image_retention_days": retention,
         "image_dir": str(IMAGE_DIR),
-        "image_url_prefix": IMAGE_URL_PREFIX,
+        "image_url_prefix": with_base_path(IMAGE_URL_PREFIX),
         "suggested_urls": [f"http://{ip}:{SERVER_PORT}" for ip in image_store.local_ipv4()],
         "font_available": image_renderer_font_ok(),
     }
@@ -868,7 +868,7 @@ def update_settings(payload: SettingsIn, mobile: str = Query(""), db: Session = 
         image_store.set_setting(
             db, image_store.SETTING_BEEIMG_TOKEN, encrypt(payload.beeimg_token.strip())
         )
-    return get_settings(db)
+    return get_settings(mobile=mobile, db=db)
 
 
 @router.post("/settings/test-image-host")

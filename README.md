@@ -503,6 +503,19 @@ A 地用户看不到 B 地的东西，除了上面这层行级过滤，还有一
 
 ## 八、生产部署建议
 
+0. **最省事：Docker 镜像包（目标机器只要装 Docker）**
+
+   ```powershell
+   # 在源码目录执行，产出 deploy\docker-dist\ 和 deploy\jijiantongzhi-docker-2.1.zip
+   powershell -ExecutionPolicy Bypass -File deploy\docker-pack.ps1
+   ```
+
+   把压缩包拷到目标机器，解压后 `bash install.sh`（Linux）或双击 `install.bat`（Windows），
+   脚本会 `docker load` 导入镜像 + 起容器。站点挂在 **`http://<IP>/jijiantongzhi/`** 子路径下，
+   数据在命名卷 `jijiantongzhi_data`（容器内 `/app/data`）。
+
+   细节见 `docker/README.md` 和 `deploy/安装说明.md`；只想在本机跑：`docker compose up -d --build`。
+
 1. **前端打包**
    ```powershell
    cd G:\codex\jijiantongzhi\frontend

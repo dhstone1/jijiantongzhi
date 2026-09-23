@@ -1,35 +1,55 @@
-# ---- Build stage ----
+# ---- Build stage：只装依赖，产物拷进运行阶段 ----
 FROM python:3.13-slim AS builder
+
+# 依赖源：默认用清华镜像（国内快十几倍）。
+# 想走官方源就加：docker build --build-arg PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
 WORKDIR /build
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -i "$PIP_INDEX_URL" -r requirements.txt
 
 # ---- Runtime stage ----
 FROM python:3.13-slim
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+# curl   : 容器健康检查用
+# tzdata : 让容器时间和本地 Windows 部署一致（CST）
+# fonts-wqy-microhei : 报表图片里的中文。PIL 会去
+#   /usr/share/fonts/truetype/wqy/wqy-microhei.ttc 找字体，不装的话中文全是方块
 RUN apt-get update -qq && \
-    apt-get install -y -qq --no-install-recommends curl ca-certificates && \
+    apt-get install -y -qq --no-install-recommends \
+        curl ca-certificates tzdata fonts-wqy-microhei && \
     rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r app && useradd -r -g app -d /app -s /sbin/nologin app
 
 WORKDIR /app
 
-# Copy installed Python packages
+# 已装好的 Python 依赖
 COPY --from=builder /install /usr/local
 
-# Copy backend code
+# 后端代码
 COPY backend/ ./backend/
 
-RUN mkdir -p /data/images && chown -R app:app /data /app
+# 数据目录固定 /app/data：
+# 数据源表里存的是本地库的绝对路径（/app/data/imports/xxx.db），
+# 目录一换，之前导入的库和演示库就全都找不到了。
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    TZ=Asia/Shanghai \
+    APP_DATA_DIR=/app/data \
+    APP_BASE_PATH=/jijiantongzhi \
+    APP_PORT=18080
+
+RUN mkdir -p /app/data/images && chown -R app:app /app
 
 USER app
 
 EXPOSE 18080
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONIOENCODING=utf-8 \
-    APP_DATA_DIR=/data
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:18080/api/health || exit 1
 
 CMD ["python", "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "18080"]
